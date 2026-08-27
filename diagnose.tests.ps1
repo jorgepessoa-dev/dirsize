@@ -30,6 +30,8 @@ $linhas = New-Object System.Collections.ArrayList
 [void]$linhas.Add(@("$base\SemAcesso",            'SemAcesso',    1, "$base",         0, '0 B',      0, 0,   '-',          '',       '',               'False'))
 [void]$linhas.Add(@("$base\Operacoes\a\b\c\d\e\f",'f',            7, "$base\Operacoes\a\b\c\d\e", 100, '100 B', 1, 0, '2020-01-01', $antiga,  'Documento', 'True'))
 [void]$linhas.Add(@("$base\Financeiro\Larga",     'Larga',        2, "$base\Financeiro", 50, '50 B', 1, 150,  '2026-01-01', $recente, 'Documento',      'True'))
+# grande + antiga MAS Complete=False -> nao pode entrar em 02 (numeros sao minimos)
+[void]$linhas.Add(@("$base\Operacoes\Parcial",    'Parcial',      2, "$base\Operacoes", 800, '800 B',  4, 0,   '2019-01-01', $antiga,  'Documento',      'False'))
 $hdr = 'Path,Name,Depth,ParentPath,SizeBytes,Size,Files,SubDirs,NewestFileLocal,NewestFileUtc,TopCategory,Complete'
 
 function New-Baseline {
@@ -74,12 +76,17 @@ function Invoke-DiagAsserts {
     # fronteira: cumulativa em Backups_2019 e ~98%, logo fora do 80 E do 95
     A '01b Backups_2019 sem marca'  (($par | Where-Object { $_.Path -eq "$base\Backups_2019" }).Pareto -eq '')
     A '01b % cumulativa cresce'    ([double]$par[0].PctCumulativa -le [double]$par[-1].PctCumulativa)
+    A '01b tem coluna TotalComplete' ($par[0].PSObject.Properties.Name -contains 'TotalComplete')
+    A '01b TotalComplete=True (raiz completa)' (@($par | Where-Object { $_.TotalComplete -ne 'True' }).Count -eq 0)
 
     $frio = Get-Rows '02-grande-e-antigo.csv'
     A '02 inclui Operacoes'        (@($frio | Where-Object { $_.Path -eq "$base\Operacoes" }).Count -eq 1)
     A '02 inclui Backups_2019'     (@($frio | Where-Object { $_.Path -eq "$base\Backups_2019" }).Count -eq 1)
     A '02 exclui Financeiro'       (@($frio | Where-Object { $_.Path -eq "$base\Financeiro" }).Count -eq 0)
     A '02 exclui SemAcesso (0B)'   (@($frio | Where-Object { $_.Path -eq "$base\SemAcesso" }).Count -eq 0)
+    # so subarvores completas: Parcial e grande e antiga mas Complete=False
+    A '02 exclui Parcial (Complete=False)' (@($frio | Where-Object { $_.Path -eq "$base\Operacoes\Parcial" }).Count -eq 0)
+    A '02 so tem Complete=True'    (@($frio | Where-Object { $_.Complete -ne 'True' }).Count -eq 0)
     A '02 ordenado por SizeBytes'  ([int64]$frio[0].SizeBytes -ge [int64]$frio[-1].SizeBytes)
 
     $cx = Get-Rows '03-complexidade.csv'
@@ -95,7 +102,10 @@ function Invoke-DiagAsserts {
     A '04 Accao diz INVESTIGAR'       ($pi[0].Accao -match 'INVESTIGAR')
 
     $cob = Get-Rows '05-cobertura-parcial.csv'
-    A '05 = so Complete=False'  (@($cob).Count -eq 1 -and $cob[0].Path -eq "$base\SemAcesso")
+    A '05 = exactamente os Complete=False' `
+        (@($cob).Count -eq 2 -and
+         @($cob | Where-Object { $_.Path -eq "$base\SemAcesso" }).Count -eq 1 -and
+         @($cob | Where-Object { $_.Path -eq "$base\Operacoes\Parcial" }).Count -eq 1)
 
     $man = Get-Rows '06-manifest-esqueleto.csv'
     A '06 uma linha por area nvl 1' (@($man).Count -eq 5)
@@ -106,14 +116,39 @@ function Invoke-DiagAsserts {
     A '_PARAMETROS.txt existe'  (Test-Path -LiteralPath (Join-Path $root 'diagnostico\_PARAMETROS.txt'))
     $pp = Get-Content -LiteralPath (Join-Path $root 'diagnostico\_PARAMETROS.txt') -Raw
     A '_PARAMETROS tem SHA-256'  ($pp -match 'csv_sha256\s*:\s*[0-9A-F]{64}')
+    A '_PARAMETROS regista raiz_complete'  ($pp -match 'raiz_complete\s*:\s*(True|False)')
 
-    # determinismo: 2a corrida -> relatorios byte-identicos (exclui _PARAMETROS, tem timestamp)
-    $h1 = Get-ChildItem -LiteralPath (Join-Path $root 'diagnostico') -File -Exclude '_PARAMETROS.txt' |
-        Sort-Object Name | ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
+    # --- validacao fail-closed da baseline: CSV estruturalmente mau -> aborta ---
+    function Test-Aborts {
+        param([string] $Nome, [string] $CsvBody)
+        $bad = Join-Path $root 'bad.csv'
+        Set-Content -LiteralPath $bad -Value $CsvBody -Encoding UTF8
+        try { & $DiagScript -CsvIn $bad -OutDir (Join-Path $root 'diag_bad') *> $null; A "aborta: $Nome" $false '(nao abortou)' }
+        catch { A "aborta: $Nome" $true }
+    }
+    $ok1 = "$base\r,r,0,X:\,10,10 B,1,0,,,Doc,True"
+    Test-Aborts 'duas raizes Depth=0'  ($hdr + "`n" + $ok1 + "`n" + "$base\b,b,0,$base,5,5 B,1,0,,,Doc,True")
+    Test-Aborts 'zero raizes Depth=0'  ($hdr + "`n" + "$base\b,b,1,$base,5,5 B,1,0,,,Doc,True")
+    Test-Aborts 'SizeBytes nao inteiro' ($hdr + "`n" + "$base\r,r,0,X:\,banana,x,1,0,,,Doc,True")
+    Test-Aborts 'Depth negativo'        ($hdr + "`n" + "$base\r,r,-1,X:\,10,10 B,1,0,,,Doc,True")
+    Test-Aborts 'Complete invalido'     ($hdr + "`n" + "$base\r,r,0,X:\,10,10 B,1,0,,,Doc,talvez")
+    Test-Aborts 'NewestFileUtc lixo'    ($hdr + "`n" + "$base\r,r,0,X:\,10,10 B,1,0,ontem,ontem,Doc,True")
+    Test-Aborts 'falta coluna'          ('Path,Name,Depth' + "`n" + "$base\r,r,0")
+
+    # determinismo: 2a corrida -> RELATORIOS byte-identicos. _PARAMETROS.txt tem
+    # timestamp e e a excepcao deliberada -- filtra-se com Where-Object porque o
+    # -Exclude do Get-ChildItem e ignorado quando se usa -LiteralPath (PS 5.1).
+    function Get-RelatorioHashes {
+        Get-ChildItem -LiteralPath (Join-Path $root 'diagnostico') -File |
+            Where-Object { $_.Name -ne '_PARAMETROS.txt' } | Sort-Object Name |
+            ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
+    }
+    $h1 = @(Get-RelatorioHashes)
     & $DiagScript -CsvIn $csv *> $null
-    $h2 = Get-ChildItem -LiteralPath (Join-Path $root 'diagnostico') -File -Exclude '_PARAMETROS.txt' |
-        Sort-Object Name | ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
-    A 'duas corridas -> byte-identicas'  (@(Compare-Object $h1 $h2).Count -eq 0)
+    $h2 = @(Get-RelatorioHashes)
+    A 'duas corridas -> relatorios byte-identicos' `
+        ($h1.Count -gt 0 -and $h1.Count -eq $h2.Count -and @(Compare-Object $h1 $h2).Count -eq 0) `
+        "(h1=$($h1.Count) h2=$($h2.Count))"
 
     return $script:_f
 }
@@ -142,6 +177,10 @@ $casos = @(
        Rx = '\$cpct -le 80'; Para = '$$cpct -le 200' }
     @{ Nome = 'M4 cobertura parcial mostra os Complete=True'
        Rx = 'Where-Object \{ -not \(Test-Truthy \$_\.Complete\) \}'; Para = 'Where-Object { (Test-Truthy $$_.Complete) }' }
+    @{ Nome = 'M5 report 02 deixa entrar Complete=False'
+       Rx = '\[int64\]\$_\.SizeBytes -gt 0 -and \(Test-Truthy \$_\.Complete\)'; Para = '[int64]$$_.SizeBytes -gt 0' }
+    @{ Nome = 'M6 Read-Baseline deixa passar baseline sem raiz'
+       Rx = 'if \(\$raizes\.Count -ne 1\)'; Para = 'if ($$false)' }
 )
 $anyMiss = $false
 foreach ($c in $casos) {

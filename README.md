@@ -99,8 +99,8 @@ Gera em `<pasta do csv>\diagnostico\`:
 | Ficheiro | O quê |
 |---|---|
 | `01-espaco-top.csv` | maiores pastas por tamanho absoluto |
-| `01b-areas-pareto.csv` | áreas de 1.º nível, % cumulativa do total, marca 80/95 |
-| `02-grande-e-antigo.csv` | pastas cujo ficheiro mais recente da subárvore é antigo → candidatas a arquivo |
+| `01b-areas-pareto.csv` | áreas de 1.º nível, % cumulativa do total, marca 80/95. Coluna `TotalComplete` = `False` → a raiz é parcial, as % são provisórias |
+| `02-grande-e-antigo.csv` | pastas **completamente observadas** cujo ficheiro mais recente da subárvore é antigo → candidatas a arquivo. As parciais ficam de fora (só entram no 05) |
 | `03-complexidade.csv` | profundas / largas / caminho longo → caras de migrar |
 | `04-pistas-limpeza.csv` | categoria ou nome batem num padrão fixo → **INVESTIGAR**, nunca eliminar |
 | `05-cobertura-parcial.csv` | `Complete=False` → números são mínimos, resolver acesso primeiro |
@@ -108,6 +108,10 @@ Gera em `<pasta do csv>\diagnostico\`:
 
 A ferramenta **faz aparecer o que precisa de decisão**; não decide. Ownership, taxonomia
 e "isto pode ser eliminado" são juízos de governação, ficam a cargo de pessoas.
+
+Determinismo: os **relatórios** (`0x-*.csv`) são byte-idênticos para o mesmo CSV + parâmetros;
+`_PARAMETROS.txt` é a exceção (tem a data). `Read-Baseline` é *fail-closed* — uma baseline
+sem exactamente uma raiz `Depth=0`, com números não-inteiros ou `Complete` inválido, aborta.
 
 ## Licença
 

@@ -16,10 +16,11 @@ Target runtime: **Windows PowerShell 5.1** (the one shipped with Windows 11). Do
 PowerShell 7 features — the intended machines do not have it.
 
 The v2 script also: captures newest-mtime per folder (`MaxMtime`, for "big AND old = archive"),
-tracks access-denied folders separately (`$script:Denied`, listed in output/HTML), shows a
-WinForms progress window with Cancel during the scan (`Show-ProgressWindow`, DoEvents pump;
-cancel yields a partial tree and exit code 2), and exports HTML (`-HtmlOut`), JSON snapshots
-(`-SnapshotOut`) plus snapshot diffing (`-CompareWith`). A per-user store in
+tracks access-denied folders separately (`$script:Scan.DeniedDirs` / `$script:Scan.DeniedItems`,
+listed in output/HTML), shows a WinForms progress window with Cancel during the scan
+(`Show-ProgressWindow`, DoEvents pump; cancel yields a partial tree and exit code 2), and
+exports HTML (`-HtmlOut`), JSON snapshots (`-SnapshotOut`) plus snapshot diffing
+(`-CompareWith`). A per-user store in
 `%APPDATA%\dirsize` keeps the recent-paths history (`recent.txt`) and GUI window
 size/position (`settings.json`); all reads/writes there are best-effort (tolerate failure).
 
@@ -29,8 +30,9 @@ avoid accented characters on purpose; HTML output (UTF-8) may use them.
 
 ## Running / testing changes
 
-There is no build step and no automated test suite. Verify changes by running the script
-directly under Windows PowerShell 5.1:
+There is no build step. There are two test suites — `golden.ps1` (the frozen scanner) and
+`diagnose.tests.ps1` (the Phase-2 tool); run the relevant one before committing. Also verify
+by running the script directly under Windows PowerShell 5.1:
 
 ```powershell
 # report mode + every exporter, no GUI (progress window suppressed)
@@ -55,9 +57,9 @@ frozen mtimes), runs report + all exporters + a snapshot diff, normalises volati
 ```powershell
 .\golden.ps1 -Mode capture     # once, against known-good code -> MANIFEST.csv
 .\golden.ps1 -Mode verify      # file diff: must print "SAIDA IDENTICA"
-.\golden.ps1 -Mode invariants  # Complete + long paths + toggles: 23 asserts
+.\golden.ps1 -Mode invariants  # Complete + long paths + Get-FlatTop + snapshot schema: 41 asserts
 .\golden.ps1 -Mode gui         # grid actions: 27 asserts, no window shown
-.\golden.ps1 -Mode all         # all three — run this before committing
+.\golden.ps1 -Mode all         # verify + invariants + gui — run this before touching dirsize.ps1
 .\golden.ps1 -Mode capture -Rebuild   # after changing the test tree
 ```
 
@@ -258,7 +260,15 @@ feature, so it is out of scope for the v2.1 freeze and has its own test suite), 
 Ownership, taxonomy and "this can be deleted" are governance judgements and stay with people.
 All rules are fixed and visible at the top of the file (`$script:CategoriasPista`,
 `$script:PadraoNomePista`, thresholds are parameters). Cleanup hits are always labelled
-INVESTIGAR. Reproducibility is a contract: same CSV + same params → byte-identical reports,
-and `_PARAMETROS.txt` records the input SHA-256 + every threshold. `diagnose.tests.ps1` runs
-29 asserts against a fixed synthetic CSV and has a `-Mutate` mode that breaks each fixed rule
-and confirms the suite fails.
+INVESTIGAR. Report `02-grande-e-antigo` only lists `Complete=True` subtrees — an incomplete
+one has lower-bound size/age and belongs in `05` instead. `01b-areas-pareto` carries a
+`TotalComplete` column (root coverage) so a partial baseline's percentages read as provisional.
+
+Determinism is scoped: the **reports** (`0x-*.csv`) are byte-identical for the same CSV +
+params; `_PARAMETROS.txt` is the deliberate exception (it has a timestamp), which is why the
+determinism test filters it out. `Read-Baseline` is **fail-closed**: exactly one `Depth=0`
+row, all numeric columns non-negative integers, `Complete` in {True,False}, `NewestFileUtc`
+empty or ISO — otherwise it throws. `Get-RootRow` has no fallback (the source is a controlled
+tool). `diagnose.tests.ps1`: 41 asserts on a fixed synthetic CSV + a `-Mutate` mode that
+breaks each fixed rule (categories, cold cutoff, Pareto threshold, coverage sign, the `02`
+Complete filter, the one-root check) and confirms the suite fails on each.

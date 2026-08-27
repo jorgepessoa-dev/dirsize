@@ -10,9 +10,12 @@
     decisoes. Todas as pistas de limpeza sao rotuladas "investigar", nunca
     "eliminar".
 
-    Reproducivel: mesmo CSV + mesmos parametros -> ficheiros byte-identicos.
-    Auditavel: _PARAMETROS.txt regista o CSV de entrada, o seu SHA-256, a data
-    e todos os limiares usados.
+    Determinismo: os RELATORIOS (0x-*.csv) sao byte-identicos para o mesmo CSV +
+    os mesmos parametros. _PARAMETROS.txt e a excepcao deliberada -- contem
+    metadados volateis da execucao (data). E por isso que os testes de
+    determinismo excluem _PARAMETROS.txt da comparacao.
+    Auditavel: _PARAMETROS.txt regista o CSV de entrada, o seu SHA-256, a data,
+    o estado de cobertura da raiz e todos os limiares usados.
 
     Alvo: Windows PowerShell 5.1. Sem dependencias externas. Sem admin.
 
@@ -83,24 +86,49 @@ $script:ColunasEsperadas = @(
 # Helpers
 # ----------------------------------------------------------------------------
 
+# Le e VALIDA a baseline. Fail-closed: uma baseline estruturalmente invalida
+# aborta -- nao se tenta inferir nada. A origem e uma ferramenta controlada
+# (dirsize), por isso qualquer desvio ao formato e um erro, nao um caso a tolerar.
 function Read-Baseline {
     param([string] $Path)
     if (-not (Test-Path -LiteralPath $Path)) { throw "CSV nao encontrado: $Path" }
     $rows = @(Import-Csv -LiteralPath $Path)
     if ($rows.Count -eq 0) { throw "CSV vazio: $Path" }
+
     $faltam = $script:ColunasEsperadas | Where-Object { $rows[0].PSObject.Properties.Name -notcontains $_ }
     if ($faltam) {
         throw ("CSV nao parece uma baseline do dirsize -- faltam colunas: {0}" -f ($faltam -join ', '))
     }
+
+    # tipos, linha a linha (Int64.TryParse e barato mesmo em 500k linhas)
+    $ln = 0; $ref = [int64]0
+    foreach ($r in $rows) {
+        $ln++
+        foreach ($col in 'Depth', 'SizeBytes', 'Files', 'SubDirs') {
+            if (-not [int64]::TryParse([string]$r.$col, [ref]$ref) -or $ref -lt 0) {
+                throw ("Linha {0}: coluna '{1}' nao e um inteiro >= 0 (valor: '{2}')" -f $ln, $col, $r.$col)
+            }
+        }
+        if ($r.Complete -ne 'True' -and $r.Complete -ne 'False') {
+            throw ("Linha {0}: coluna 'Complete' tem de ser True ou False (valor: '{1}')" -f $ln, $r.Complete)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($r.NewestFileUtc) -and $null -eq (ConvertFrom-Iso $r.NewestFileUtc)) {
+            throw ("Linha {0}: 'NewestFileUtc' nem vazio nem ISO 8601 valido (valor: '{1}')" -f $ln, $r.NewestFileUtc)
+        }
+    }
+
+    # exactamente uma raiz
+    $raizes = @($rows | Where-Object { [int]$_.Depth -eq 0 })
+    if ($raizes.Count -ne 1) {
+        throw "A baseline tem de ter EXACTAMENTE uma linha Depth=0 (tem $($raizes.Count))"
+    }
     return $rows
 }
 
-# Linha da raiz da arvore (Depth = 0). Fallback: a de maior SizeBytes.
+# A raiz e a (unica) linha Depth=0 -- garantido por Read-Baseline.
 function Get-RootRow {
     param($Rows)
-    $r = @($Rows | Where-Object { [int]$_.Depth -eq 0 })
-    if ($r.Count -ge 1) { return ($r | Sort-Object { [int64]$_.SizeBytes } -Descending)[0] }
-    return ($Rows | Sort-Object { [int64]$_.SizeBytes } -Descending)[0]
+    return @($Rows | Where-Object { [int]$_.Depth -eq 0 })[0]
 }
 
 # Converte NewestFileUtc (ISO 8601 UTC) para [datetime], ou $null se vazio.
@@ -153,9 +181,12 @@ function Get-RankEspaco {
 
 # 01b - Pareto das AREAS (nivel N): irmaos ao mesmo nivel nao se sobrepoem, por
 #       isso somar os seus tamanhos e valido. % cumulativa sobre o total da raiz.
+#       TotalComplete = estado de cobertura da raiz: se for False, Root.SizeBytes
+#       e um MINIMO e o denominador pode crescer -> as % sao PROVISORIAS.
 function Get-RankAreasPareto {
     param($Rows, $Root, [int] $Nivel)
     $total = [int64]$Root.SizeBytes
+    $totComplete = if (Test-Truthy $Root.Complete) { 'True' } else { 'False' }
     $areas = @($Rows |
         Where-Object { [int]$_.Depth -eq $Nivel } |
         Sort-Object @{ e = { [int64]$_.SizeBytes }; Descending = $true }, Path)
@@ -170,6 +201,7 @@ function Get-RankAreasPareto {
             Path = $a.Path; Size = $a.Size; SizeBytes = $b
             PctDoTotal = $pct; PctCumulativa = $cpct; Pareto = $mark
             Files = [int]$a.Files; TopCategory = $a.TopCategory; Complete = $a.Complete
+            TotalComplete = $totComplete
         }
     }
     return $out
@@ -177,11 +209,14 @@ function Get-RankAreasPareto {
 
 # 02 - grande E antigo: o ficheiro mais recente de TODA a subarvore e anterior a
 #      $FrioAntesDe -> nada la dentro mudou recentemente. Candidato a arquivo.
+#      SO subarvores COMPLETAMENTE observadas entram aqui: numa pasta Complete=False
+#      o tamanho e a data sao minimos -- o ficheiro mais recente pode estar na
+#      parte que nao se conseguiu ler. Essas pastas aparecem em 05-cobertura-parcial.
 function Get-RankFrio {
     param($Rows, $Root, [datetime] $Corte)
     $Rows |
         Where-Object {
-            $_.Path -ne $Root.Path -and [int64]$_.SizeBytes -gt 0
+            $_.Path -ne $Root.Path -and [int64]$_.SizeBytes -gt 0 -and (Test-Truthy $_.Complete)
         } |
         ForEach-Object {
             $dt = ConvertFrom-Iso $_.NewestFileUtc
@@ -306,7 +341,7 @@ Write-Host ''
 Write-Report '01-espaco-top.csv'       (Get-RankEspaco       -Rows $rows -Root $root -N $TopEspaco) `
     @('Path','Size','SizeBytes','Depth','Files','TopCategory','Complete')
 Write-Report '01b-areas-pareto.csv'    (Get-RankAreasPareto  -Rows $rows -Root $root -Nivel $ManifestNivel) `
-    @('Path','Size','SizeBytes','PctDoTotal','PctCumulativa','Pareto','Files','TopCategory','Complete')
+    @('Path','Size','SizeBytes','PctDoTotal','PctCumulativa','Pareto','Files','TopCategory','Complete','TotalComplete')
 Write-Report '02-grande-e-antigo.csv'  (Get-RankFrio         -Rows $rows -Root $root -Corte $FrioAntesDe) `
     @('Path','Size','SizeBytes','FicheiroMaisRecente','Files','TopCategory','Complete')
 Write-Report '03-complexidade.csv'     (Get-RankComplexidade -Rows $rows -Root $root -Profundo $ProfundoEm -Largo $LargoEm) `
@@ -328,6 +363,7 @@ $params = @(
     "csv_pastas      : $($rows.Count)"
     "raiz            : $($root.Path)"
     "raiz_bytes      : $($root.SizeBytes)"
+    "raiz_complete   : $($root.Complete)   # False -> totais e % do Pareto sao MINIMOS/provisorios"
     "TopEspaco       : $TopEspaco"
     "FrioAntesDe     : $($FrioAntesDe.ToString('yyyy-MM-dd'))"
     "ProfundoEm      : $ProfundoEm"
