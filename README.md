@@ -26,8 +26,13 @@ Este script resolve os três problemas usando apenas PowerShell + .NET
   em modo **interativo de consola** (afundas numa pasta só quando escolheres),
   ou em modo **relatório** com profundidade fixa. A navegação é **instantânea**
   porque parte da árvore já em memória — não recalcula pastas ao entrar.
-- **Pista do "assunto" sem semântica** — `-ShowExtensions` mostra o breakdown por
-  extensão de cada pasta (que *tipo* de conteúdo predomina: docs, vídeos, zips…).
+- **Foco Pareto (80/20)** — em cada nível assinala quantas das maiores pastas
+  somam 80% do espaço ("as poucas vitais" onde deves atuar primeiro).
+- **Tipo de conteúdo sem semântica** — classifica os ficheiros em categorias
+  legíveis (Vídeo, Imagem, Documento, Email/PST, Comprimido/Backup, CAD,
+  Base de dados, Instaladores…) e mostra o predominante por pasta. Dá-te uma
+  ideia do *que* é cada pasta sem interpretar conteúdos. Na consola liga-se com
+  `-ShowExtensions`; na janela gráfica aparece sempre na coluna "Conteúdo".
 - **Junctions / symlinks ignorados** — evita contagens duplicadas e loops.
 - **Exportação CSV** — árvore completa, uma linha por pasta.
 
@@ -86,7 +91,7 @@ powershell -ExecutionPolicy Bypass -File .\Analyze-FolderSizes.ps1 -Path '\\serv
 | `-Depth` | Modo relatório: nº de camadas a imprimir de uma vez | `0` (= interativo) |
 | `-Gui` | Abre a janela gráfica (duplo-clique para entrar) | — |
 | `-Interactive` | Força o modo interativo de consola | — |
-| `-ShowExtensions` | Mostra tipos de ficheiro por pasta | desligado |
+| `-ShowExtensions` | Mostra a categoria de conteúdo por pasta (consola) | desligado |
 | `-Exclude` | Nomes de pasta a ignorar (wildcards) | — |
 | `-CsvOut` | Caminho para exportar a árvore em CSV | — |
 

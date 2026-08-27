@@ -102,6 +102,70 @@ function Test-Excluded {
     return $false
 }
 
+# Mapa extensao -> categoria legivel (sem semantica: so classificacao por tipo).
+$script:CategoryMap = @{}
+$defs = @{
+    'Video'          = '.mp4 .mov .avi .mkv .wmv .flv .m4v .mpg .mpeg .webm .vob .m2ts'
+    'Imagem'         = '.jpg .jpeg .png .gif .bmp .tif .tiff .heic .webp .raw .cr2 .nef .arw .dng .psd .ai .svg'
+    'Documento'      = '.doc .docx .odt .rtf .txt .pdf .md .pages .wpd'
+    'Folha calculo'  = '.xls .xlsx .xlsm .xlsb .csv .ods'
+    'Apresentacao'   = '.ppt .pptx .odp .key'
+    'Email'          = '.pst .ost .msg .eml .mbox .nsf'
+    'Comprimido/Bkp' = '.zip .rar .7z .tar .gz .bz2 .xz .bak .bkf .vhd .vhdx .iso .cab .arc'
+    'Audio'          = '.mp3 .wav .flac .aac .wma .ogg .m4a .aiff'
+    'CAD/Eng'        = '.dwg .dxf .step .stp .iges .igs .stl .sldprt .sldasm .ipt .iam .rvt .catpart .prt'
+    'Base de dados'  = '.mdb .accdb .db .sqlite .mdf .ldf .dbf .frm .myd'
+    'Codigo/Dev'     = '.cs .js .ts .py .java .cpp .c .h .php .rb .go .rs .ps1 .sh .html .css .json .xml .yml .yaml .sql'
+    'Instalador/Bin' = '.exe .msi .msu .msp .appx .dll .sys .bin'
+    'Fonte'          = '.ttf .otf .woff .woff2 .fon'
+}
+foreach ($cat in $defs.Keys) {
+    foreach ($e in ($defs[$cat] -split '\s+')) { if ($e) { $script:CategoryMap[$e] = $cat } }
+}
+
+function Get-Category {
+    param([string] $ext)
+    if ($null -eq $ext -or $ext -eq '(sem ext)') { return 'Sem extensao' }
+    $c = $script:CategoryMap[$ext.ToLowerInvariant()]
+    if ($c) { return $c }
+    return 'Outro'
+}
+
+# Agrega o hashtable Ext (ext->bytes) de um no em categorias (categoria->bytes),
+# devolvendo pares ordenados por tamanho desc.
+function Get-CategoryBreakdown {
+    param($node)
+    $cats = @{}
+    foreach ($k in $node.Ext.Keys) {
+        $cat = Get-Category $k
+        if ($cats.ContainsKey($cat)) { $cats[$cat] += $node.Ext[$k] } else { $cats[$cat] = $node.Ext[$k] }
+    }
+    return ($cats.GetEnumerator() | Sort-Object Value -Descending)
+}
+
+# Texto curto com as top categorias de um no (ex.: "Video 4.20 GB | Imagem 900 MB").
+function Get-CategoryText {
+    param($node, [int] $top = 3)
+    $bd = Get-CategoryBreakdown $node | Select-Object -First $top
+    $parts = foreach ($e in $bd) { "$($e.Key) $(Format-Size $e.Value)" }
+    return ($parts -join '  |  ')
+}
+
+# Regra de Pareto: quantas das maiores criancas somam >= $fraction do total,
+# e que fatia essas representam. Devolve [pscustomobject]{ Count; Share }.
+function Get-ParetoInfo {
+    param($node, [double] $fraction = 0.8)
+    $total = $node.Size
+    if ($total -le 0) { return [pscustomobject]@{ Count = 0; Share = 0.0 } }
+    $sorted = $node.Children | Sort-Object Size -Descending
+    $acc = [int64]0; $n = 0
+    foreach ($c in $sorted) {
+        $acc += $c.Size; $n++
+        if ($acc / $total -ge $fraction) { break }
+    }
+    return [pscustomobject]@{ Count = $n; Share = [math]::Round(($acc / $total) * 100, 1) }
+}
+
 # Estado global do scan
 $script:ErrCount   = 0
 $script:Errors     = New-Object System.Collections.Generic.List[string]
@@ -204,9 +268,7 @@ function Show-Ext {
     param($node, [int]$pad = 0)
     if (-not $ShowExtensions -or $node.Ext.Count -eq 0) { return }
     $prefix = (' ' * $pad)
-    $tops = $node.Ext.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 5
-    $parts = foreach ($e in $tops) { "$($e.Key) $(Format-Size $e.Value)" }
-    Write-Host ("$prefix    tipos: " + ($parts -join '  |  ')) -ForegroundColor DarkGray
+    Write-Host ("$prefix    tipos: " + (Get-CategoryText -node $node -top 4)) -ForegroundColor DarkGray
 }
 
 function Show-Children {
@@ -230,6 +292,11 @@ function Show-Children {
     if ($rest -gt 0) {
         $restSize = ($sorted | Select-Object -Skip $top | Measure-Object Size -Sum).Sum
         Write-Host ('{0}     ... + {1} outras pastas ({2})' -f $pad, $rest, (Format-Size $restSize)) -ForegroundColor DarkGray
+    }
+    if ($sorted.Count -gt 1) {
+        $p = Get-ParetoInfo -node $node -fraction 0.8
+        Write-Host ('{0}     >> Pareto: as {1} maiores pastas = {2}% do espaco (foca aqui)' -f `
+            $pad, $p.Count, $p.Share) -ForegroundColor Yellow
     }
     return $shown
 }
@@ -317,30 +384,29 @@ function Update-GuiGrid {
     [void]$dt.Columns.Add('%', [double])
     [void]$dt.Columns.Add('Ficheiros', [int])
     [void]$dt.Columns.Add('Subpastas', [int])
-    [void]$dt.Columns.Add('Tipos', [string])
+    [void]$dt.Columns.Add('Conteudo', [string])
     [void]$dt.Columns.Add('Idx', [int])
 
     $i = 0
     foreach ($c in $script:GuiNodes) {
         $pct = 0.0
         if ($node.Size -gt 0) { $pct = [math]::Round(($c.Size / $node.Size) * 100, 1) }
-        $tipos = ''
-        if ($c.Ext.Count -gt 0) {
-            $tp = $c.Ext.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 3 |
-                  ForEach-Object { $_.Key }
-            $tipos = ($tp -join ', ')
-        }
-        [void]$dt.Rows.Add($c.Name, (Format-Size $c.Size), $pct, $c.FileCount, $c.DirCount, $tipos, $i)
+        $conteudo = ''
+        if ($c.Ext.Count -gt 0) { $conteudo = Get-CategoryText -node $c -top 3 }
+        [void]$dt.Rows.Add($c.Name, (Format-Size $c.Size), $pct, $c.FileCount, $c.DirCount, $conteudo, $i)
         $i++
     }
 
     $script:GuiGrid.DataSource = $dt
-    if ($script:GuiGrid.Columns['Idx'])   { $script:GuiGrid.Columns['Idx'].Visible = $false }
-    if ($script:GuiGrid.Columns['Nome'])  { $script:GuiGrid.Columns['Nome'].FillWeight = 240 }
-    if ($script:GuiGrid.Columns['Tipos']) { $script:GuiGrid.Columns['Tipos'].FillWeight = 180 }
+    if ($script:GuiGrid.Columns['Idx'])      { $script:GuiGrid.Columns['Idx'].Visible = $false }
+    if ($script:GuiGrid.Columns['Nome'])     { $script:GuiGrid.Columns['Nome'].FillWeight = 220 }
+    if ($script:GuiGrid.Columns['Conteudo']) { $script:GuiGrid.Columns['Conteudo'].FillWeight = 260 }
 
-    $script:GuiLbl.Text = ('{0}    —    Total: {1}  |  {2} ficheiros  |  {3} subpastas' -f `
-        $node.Path, (Format-Size $node.Size), $node.FileCount, $node.DirCount)
+    $p = Get-ParetoInfo -node $node -fraction 0.8
+    $pareto = ''
+    if ($node.Children.Count -gt 1) { $pareto = ('   —   Pareto: {0} maiores = {1}% do espaco' -f $p.Count, $p.Share) }
+    $script:GuiLbl.Text = ('{0}    —    Total: {1}  |  {2} fich.  |  {3} subpastas{4}' -f `
+        $node.Path, (Format-Size $node.Size), $node.FileCount, $node.DirCount, $pareto)
     $script:GuiBtnUp.Enabled = ($script:GuiStack.Count -gt 0)
 }
 
@@ -484,6 +550,9 @@ Write-Host ("Subpastas      : $($root.DirCount)")
 Write-Host ("Long paths >260: $($script:LongPaths.Count)")
 Write-Host ("Erros/negados  : $($script:ErrCount)")
 Write-Host ("Tempo          : $([math]::Round($sw.Elapsed.TotalSeconds,1))s")
+if ($root.Ext.Count -gt 0) {
+    Write-Host ("Conteudo       : " + (Get-CategoryText -node $root -top 6))
+}
 Write-Host '=========================================' -ForegroundColor Green
 
 # Export CSV opcional (uma linha por pasta, achatando a arvore)
