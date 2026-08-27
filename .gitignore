@@ -1,0 +1,12 @@
+# Saídas do próprio script
+*.csv
+
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Editores
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,89 @@
+# folder-size-analyzer
+
+Script **PowerShell** para analisar o espaço ocupado por ficheiros e pastas numa
+localização de rede (`\\servidor\share\...`) ou local, de forma **granular** (por
+camadas), **sem necessidade de privilégios de administrador** e com suporte a
+**caminhos longos** que ultrapassam o limite de 260 caracteres (MAX_PATH).
+
+## Porquê
+
+Ferramentas gráficas (TreeSize, WinDirStat, etc.) muitas vezes:
+
+- exigem instalação / permissões que não tens numa máquina corporativa;
+- falham em caminhos com mais de 260 caracteres;
+- despejam a árvore inteira de uma vez, afogando-te em dados.
+
+Este script resolve os três problemas usando apenas PowerShell + .NET
+(`System.IO`), disponível em qualquer Windows.
+
+## Características
+
+- **Sem admin** — só lê; acessos negados são apanhados, contados, e o scan continua.
+- **Long paths (>260)** — usa o prefixo estendido `\\?\` / `\\?\UNC\` para ignorar
+  o MAX_PATH. No fim lista os ficheiros cujo caminho passa os 260 caracteres.
+- **Granular** — faz **um** scan e guarda a árvore em memória. Depois navegas:
+  em modo **interativo** (afundas numa pasta só quando escolheres), ou em modo
+  **relatório** com profundidade fixa.
+- **Pista do "assunto" sem semântica** — `-ShowExtensions` mostra o breakdown por
+  extensão de cada pasta (que *tipo* de conteúdo predomina: docs, vídeos, zips…).
+- **Junctions / symlinks ignorados** — evita contagens duplicadas e loops.
+- **Exportação CSV** — árvore completa, uma linha por pasta.
+
+## Utilização
+
+```powershell
+# Modo interativo (default) — afundas camada a camada só onde quiseres
+.\Analyze-FolderSizes.ps1 -Path '\\servidor\share\Pasta'
+
+# Relatório fixo de 2 níveis, top 10, com tipos de ficheiro
+.\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -Depth 2 -Top 10 -ShowExtensions
+
+# Scan + exportar árvore completa para CSV
+.\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -CsvOut relatorio.csv
+
+# Ignorar pastas durante o scan
+.\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -Exclude 'node_modules','.git'
+```
+
+Se a política de execução estiver bloqueada (comum em máquinas corporativas),
+corre **sem alterar nada no sistema**, só para esta invocação:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Analyze-FolderSizes.ps1 -Path '\\servidor\share'
+```
+
+### No modo interativo
+
+| Tecla | Ação |
+|-------|------|
+| `n` (número) | afundar na pasta número *n* |
+| `u` | subir um nível |
+| `e` | ligar/desligar o breakdown por extensão |
+| `q` | sair |
+
+## Parâmetros
+
+| Parâmetro | Descrição | Default |
+|-----------|-----------|---------|
+| `-Path` | Localização a analisar (obrigatório) | — |
+| `-Top` | Nº de pastas a mostrar por nível | `15` |
+| `-Depth` | Modo relatório: nº de camadas a imprimir de uma vez | `0` (= interativo) |
+| `-Interactive` | Força o modo interativo | — |
+| `-ShowExtensions` | Mostra tipos de ficheiro por pasta | desligado |
+| `-Exclude` | Nomes de pasta a ignorar (wildcards) | — |
+| `-CsvOut` | Caminho para exportar a árvore em CSV | — |
+
+## Nota de desempenho
+
+Calcular o tamanho de cada pasta obriga a percorrer **tudo** uma vez, por isso o
+scan inicial de um share grande demora (há uma barra de progresso). Depois disso,
+a navegação é instantânea porque a árvore já está em memória.
+
+## Requisitos
+
+- Windows PowerShell 5.1 (o que vem por omissão no Windows) ou PowerShell 7+.
+- Nenhuma dependência externa.
+
+## Licença
+
+MIT — ver [LICENSE](LICENSE).
