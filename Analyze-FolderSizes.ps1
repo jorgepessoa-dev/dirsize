@@ -18,6 +18,8 @@
 
 .PARAMETER Path
     Localizacao a analisar. Ex: \\servidor\share\pasta  ou  D:\Dados
+    Se for OMITIDO, abre uma janela para escolher a pasta (colar \\servidor\share
+    ou navegar com "Procurar..."), e os resultados aparecem tambem em janela.
 
 .PARAMETER Top
     Quantas pastas/itens mostrar por nivel (as maiores primeiro). Default: 15.
@@ -45,6 +47,10 @@
     Caminho para exportar a arvore completa (uma linha por pasta) em CSV.
 
 .EXAMPLE
+    .\Analyze-FolderSizes.ps1
+    # sem argumentos: abre janela para ESCOLHER a pasta e mostra resultados em janela
+
+.EXAMPLE
     .\Analyze-FolderSizes.ps1 -Path '\\servidor\share\Projetos'
     # scan + navegacao interativa na consola
 
@@ -62,7 +68,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)] [string] $Path,
+    [string] $Path,
     [int]    $Top = 15,
     [int]    $Depth = 0,
     [switch] $Interactive,
@@ -424,6 +430,71 @@ function Enter-GuiRow {
 }
 
 # ----------------------------------------------------------------------------
+# Dialogo grafico para ESCOLHER a pasta/share a analisar (quando -Path e omitido).
+# Campo para colar um caminho \\servidor\share + botao "Procurar..." para navegar.
+# Devolve o caminho escolhido, ou $null se cancelado/indisponivel.
+# ----------------------------------------------------------------------------
+function Select-FolderGui {
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+
+        $f = New-Object System.Windows.Forms.Form
+        $f.Text = 'Folder Size Analyzer — escolher pasta'
+        $f.Size = New-Object System.Drawing.Size(620, 175)
+        $f.StartPosition = 'CenterScreen'
+        $f.FormBorderStyle = 'FixedDialog'
+        $f.MaximizeBox = $false
+        $f.MinimizeBox = $false
+
+        $lab = New-Object System.Windows.Forms.Label
+        $lab.Text = 'Pasta ou share de rede a analisar (podes colar um caminho \\servidor\share):'
+        $lab.Location = New-Object System.Drawing.Point(12, 15)
+        $lab.Size = New-Object System.Drawing.Size(590, 20)
+
+        $tb = New-Object System.Windows.Forms.TextBox
+        $tb.Location = New-Object System.Drawing.Point(12, 42)
+        $tb.Size = New-Object System.Drawing.Size(480, 24)
+
+        $browse = New-Object System.Windows.Forms.Button
+        $browse.Text = 'Procurar...'
+        $browse.Location = New-Object System.Drawing.Point(500, 40)
+        $browse.Size = New-Object System.Drawing.Size(95, 26)
+        # Nota: so mutamos o objeto $tb (referencia capturada) -> seguro no handler.
+        $browse.Add_Click({
+            $d = New-Object System.Windows.Forms.FolderBrowserDialog
+            $d.Description = 'Escolhe a pasta, ou navega ate Rede -> servidor -> share'
+            $d.ShowNewFolderButton = $false
+            if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $tb.Text = $d.SelectedPath }
+        })
+
+        $ok = New-Object System.Windows.Forms.Button
+        $ok.Text = 'Analisar'
+        $ok.Location = New-Object System.Drawing.Point(400, 92)
+        $ok.Size = New-Object System.Drawing.Size(95, 28)
+        $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+
+        $cancel = New-Object System.Windows.Forms.Button
+        $cancel.Text = 'Cancelar'
+        $cancel.Location = New-Object System.Drawing.Point(500, 92)
+        $cancel.Size = New-Object System.Drawing.Size(95, 28)
+        $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+
+        $f.Controls.AddRange(@($lab, $tb, $browse, $ok, $cancel))
+        $f.AcceptButton = $ok
+        $f.CancelButton = $cancel
+
+        if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK -and $tb.Text.Trim()) {
+            return $tb.Text.Trim()
+        }
+        return $null
+    }
+    catch {
+        return $null
+    }
+}
+
+# ----------------------------------------------------------------------------
 # Janela grafica (WinForms) sobre a arvore JA em memoria -> navegacao instantanea.
 # Nao precisa de admin. Funciona em PowerShell 5.1 e 7+ num ambiente com desktop
 # (consola local ou sessao RDP). Nao funciona em SSH puro sem interface grafica.
@@ -528,6 +599,22 @@ function Show-Gui {
 # ----------------------------------------------------------------------------
 # Execucao
 # ----------------------------------------------------------------------------
+# Sem -Path: abre o seletor grafico (fluxo totalmente grafico). Se a GUI nao
+# estiver disponivel, pede o caminho na consola.
+if ([string]::IsNullOrWhiteSpace($Path)) {
+    $picked = Select-FolderGui
+    if ($picked) {
+        $Path = $picked
+        $Gui  = $true   # escolheu graficamente -> resultados tambem em janela
+    }
+    else {
+        $Path = Read-Host 'Indica a pasta ou share a analisar (ex: \\servidor\share)'
+    }
+}
+if ([string]::IsNullOrWhiteSpace($Path)) {
+    Write-Error 'Nenhum caminho indicado. A sair.'; exit 1
+}
+
 if (-not (Test-Path -LiteralPath $Path)) {
     # Test-Path pode falhar em long paths; tenta enumerar a raiz na mesma
     try { [System.IO.Directory]::EnumerateFileSystemEntries((ConvertTo-ExtendedPath $Path)) | Out-Null }

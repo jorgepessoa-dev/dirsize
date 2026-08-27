@@ -39,6 +39,9 @@ Este script resolve os três problemas usando apenas PowerShell + .NET
 ## Utilização
 
 ```powershell
+# Sem argumentos: abre uma JANELA para escolher a pasta e mostra resultados em janela
+.\Analyze-FolderSizes.ps1
+
 # Janela gráfica (estilo TreeSize) — duplo-clique para entrar nas pastas
 .\Analyze-FolderSizes.ps1 -Path '\\servidor\share\Pasta' -Gui
 
@@ -86,7 +89,7 @@ powershell -ExecutionPolicy Bypass -File .\Analyze-FolderSizes.ps1 -Path '\\serv
 
 | Parâmetro | Descrição | Default |
 |-----------|-----------|---------|
-| `-Path` | Localização a analisar (obrigatório) | — |
+| `-Path` | Localização a analisar. Se omitido, abre janela para escolher a pasta | — |
 | `-Top` | Nº de pastas a mostrar por nível | `15` |
 | `-Depth` | Modo relatório: nº de camadas a imprimir de uma vez | `0` (= interativo) |
 | `-Gui` | Abre a janela gráfica (duplo-clique para entrar) | — |
