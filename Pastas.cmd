@@ -12,7 +12,11 @@ set "HERE=%~dp0"
 rem  Remove a marca "ficheiro da Internet" (MOTW) dos ficheiros da pasta. Sob uma
 rem  GPO corporativa (MachinePolicy = RemoteSigned) o -ExecutionPolicy Bypass e
 rem  ignorado, e so o Unblock-File permite correr um .ps1 descarregado.
-powershell.exe -NoProfile -Command "Get-ChildItem -Path '%HERE%*.ps1' | Unblock-File" 1>nul 2>nul
+rem  -LiteralPath + -Filter (e nao -Path com wildcard): se a pasta do repo tiver
+rem  '[' ou ']' no nome, o -Path trata-os como classe de caracteres e nao
+rem  encontra nada -- o Unblock-File nao corria e o .ps1 ficava bloqueado, em
+rem  silencio, que e exactamente o que este lancador existe para evitar.
+powershell.exe -NoProfile -Command "Get-ChildItem -LiteralPath '%HERE%.' -Filter *.ps1 | Unblock-File" 1>nul 2>nul
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%HERE%dirsize.ps1" %*
 set "RC=%ERRORLEVEL%"

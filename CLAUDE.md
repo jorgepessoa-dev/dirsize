@@ -72,6 +72,11 @@ console `e` toggle reaching `Show-Ext`. Mutation-verified against dropping the c
 the child→parent propagation, the `enum-dir` marking, the `≥` prefix, and the extended prefix
 on the enumeration root.
 
+Both `invariants` and `gui` load the script's functions via AST — and also re-run its
+`Add-Type` block, because `FsReparse.Native` is declared at script level, not inside a
+function. Without it `Test-IsJunctionOrSymlink` throws, its `catch` returns `$false`, junctions
+stop being skipped, and the harness silently measures a different tree than the real script.
+
 `gui` loads the script's functions
 via AST (without running its execution section), wires `$script:Ui` to a real `DataGridView`
 parented to a Form that is created but never shown (columns/rows don't materialise until the
@@ -169,6 +174,18 @@ Everything is in `dirsize.ps1`, organized top-to-bottom as:
   and the assumption for the target corporate estate. Note the dev machine here has it set to
   1, so long-path tests pass either way; the suite therefore asserts the prefix directly, by
   checking that the denied-folder error message quotes a `\\?\` path.
+- **`@($x)` throws on a `List[object]`** in this PS 5.1 build ("os tipos de argumentos não
+  correspondem" / ArgumentException) — reproduced in a clean `-NoProfile` process.
+  `List[string]` and `ArrayList` are fine; it is specific to the generic closed over `Object`,
+  which is what every collection here uses (`Children`, `Errors`, `LongPaths`, `Nodes`, …).
+  `@($list | …)`, `$list.ToArray()`, `[object[]]$list` and `,$list` all work — which is why the
+  older `@($list | Sort-Object …)` code never hit it. Use `.ToArray()`.
+- `return` **unrolls a one-element array to a scalar**. Any function whose result gets indexed
+  (`Get-FlatTop` → `$script:Ui.Nodes[$i]`, reachable with `-FlatTop 1`) must return `,$array`.
+- **`Sort-Object` is not stable in PS 5.1** (`-Stable` is PS 6+), so tie order is arbitrary.
+  `Get-FlatTop` uses insertion order for ties instead, which is deterministic; the invariant
+  suite therefore asserts *same sizes and same set*, plus determinism across calls — not
+  position-by-position equality against `Sort-Object`.
 - Code must run under **Windows PowerShell 5.1** (.NET Framework, STA console). Avoid
   PowerShell-7-only syntax/APIs (`ForEach-Object -Parallel`, `??`, ternary, `-AsHashtable`,
   etc.). Clipboard/WinForms rely on the 5.1 console being STA.

@@ -161,6 +161,7 @@ function Save-AppSettings {
     try {
         $d = Get-AppDataDir; if (-not $d) { return }
         $f = Join-Path $d 'settings.json'
+        if (-not $form -or $form.IsDisposed) { return }
         $cur = Get-AppSettings
         $obj = [ordered]@{}
         if ($cur) { foreach ($pp in $cur.PSObject.Properties) { $obj[$pp.Name] = $pp.Value } }
@@ -554,18 +555,45 @@ function Get-IncompleteCount {
     return $c
 }
 
-# Lista plana de TODAS as pastas da arvore, maiores primeiro (iterativo).
+# As N maiores pastas de TODA a arvore (iterativo, sem recursao).
+# Nao ordena a arvore inteira: mantem so as N maiores durante o varrimento, com
+# insercao binaria numa lista de N. Num share de 200 mil pastas isso e ~380 ms
+# contra ~6,7 s do 'Sort-Object | Select -First N' (medido; resultado identico).
+# Vale a pena porque isto corre a cada render da vista "Top global".
 function Get-FlatTop {
     param($root, [int] $n = 50, [switch] $IncludeRoot)
-    $list  = New-Object System.Collections.Generic.List[object]
-    $stack = New-Object System.Collections.Generic.Stack[object]
+    if ($n -le 0) { return @() }
+    # NAO chamar esta lista '$top': $Top e parametro do script ([int] $Top = 15)
+    # e os nomes de variaveis nao distinguem maiusculas -- a restricao de tipo
+    # do parametro faz a atribuicao rebentar. Mesma armadilha de $Gui/$Version.
+    $keep    = New-Object System.Collections.Generic.List[object]
+    $minKept = [int64]::MinValue
+    $stack   = New-Object System.Collections.Generic.Stack[object]
     $stack.Push($root)
     while ($stack.Count -gt 0) {
         $x = $stack.Pop()
-        if ($IncludeRoot -or -not [object]::ReferenceEquals($x, $root)) { $list.Add($x) }
         foreach ($c in $x.Children) { $stack.Push($c) }
+        if (-not $IncludeRoot -and [object]::ReferenceEquals($x, $root)) { continue }
+        if ($keep.Count -lt $n -or $x.Size -gt $minKept) {
+            # posicao por tamanho desc; empates mantem a ordem de chegada
+            $lo = 0; $hi = $keep.Count
+            while ($lo -lt $hi) {
+                $mid = ($lo + $hi) -shr 1
+                if ($keep[$mid].Size -ge $x.Size) { $lo = $mid + 1 } else { $hi = $mid }
+            }
+            $keep.Insert($lo, $x)
+            if ($keep.Count -gt $n) { $keep.RemoveAt($n) }
+            $minKept = $keep[$keep.Count - 1].Size
+        }
     }
-    return @($list | Sort-Object Size -Descending | Select-Object -First $n)
+    # Duas subtilezas do PS 5.1, ambas ja custaram tempo:
+    #  - .ToArray() e nao @($keep): @() sobre um List[object] lanca
+    #    ArgumentException nesta build (@(pipeline) funciona, e por isso o
+    #    codigo antigo, que fazia @($lista | Sort-Object ...), nunca tropecou).
+    #  - virgula a frente: sem ela o 'return' DESENROLA um array de 1 elemento
+    #    para escalar, e quem faz Get-FlatTop[...] (a vista Top global com
+    #    -FlatTop 1) rebentava. Devolve-se sempre um array.
+    return ,$keep.ToArray()
 }
 
 # ----------------------------------------------------------------------------
@@ -765,6 +793,17 @@ function Compare-Snapshot {
         $prev = Get-Content -LiteralPath $PrevPath -Raw -Encoding UTF8 | ConvertFrom-Json
     } catch {
         Write-Warning "Nao consegui ler o snapshot '$PrevPath': $($_.Exception.Message)"; return $null
+    }
+    # Sem esta validacao, um ficheiro JSON valido mas que nao seja um snapshot
+    # (ou truncado) da $prev.folders = $null -> o diff corre em silencio contra
+    # uma base vazia e RELATA que tudo e novo e que o total cresceu do zero.
+    # Um resultado errado sem aviso e pior do que uma falha.
+    if ($null -eq $prev -or
+        -not $prev.PSObject.Properties['meta'] -or
+        -not $prev.PSObject.Properties['folders'] -or
+        $null -eq $prev.folders) {
+        Write-Warning "'$PrevPath' nao tem o formato de snapshot (falta 'meta'/'folders'). Comparacao ignorada."
+        return $null
     }
 
     $prevMap = @{}

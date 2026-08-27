@@ -80,6 +80,18 @@ function Invoke-GuiTests {
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$null, [ref]$null)
     $fns = $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)
     foreach ($f in $fns) { . ([scriptblock]::Create($f.Extent.Text)) }
+    # O Add-Type do FsReparse.Native esta no corpo do script, nao numa funcao,
+    # por isso carregar so as funcoes deixaria Test-IsJunctionOrSymlink a lancar
+    # (tipo inexistente) -> catch -> $false -> junctions NAO eram ignoradas e a
+    # arvore de teste ficava diferente da real. Executa-se aqui esse bloco.
+    if (-not ('FsReparse.Native' -as [type])) {
+        $addType = $ast.FindAll({
+            $args[0] -is [System.Management.Automation.Language.CommandAst] -and
+            $args[0].GetCommandName() -eq 'Add-Type' }, $false) | Select-Object -First 1
+        if ($addType) { . ([scriptblock]::Create($addType.Extent.Text)) }
+    }
+    $script:TagMountPoint = [uint32] 2684354563
+    $script:TagSymlink    = [uint32] 2684354572
 
     # parametros que as funcoes leem do scope do script
     $script:Exclude        = @()
@@ -248,6 +260,18 @@ function Invoke-InvariantTests {
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$null, [ref]$null)
     $fns = $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)
     foreach ($f in $fns) { . ([scriptblock]::Create($f.Extent.Text)) }
+    # O Add-Type do FsReparse.Native esta no corpo do script, nao numa funcao,
+    # por isso carregar so as funcoes deixaria Test-IsJunctionOrSymlink a lancar
+    # (tipo inexistente) -> catch -> $false -> junctions NAO eram ignoradas e a
+    # arvore de teste ficava diferente da real. Executa-se aqui esse bloco.
+    if (-not ('FsReparse.Native' -as [type])) {
+        $addType = $ast.FindAll({
+            $args[0] -is [System.Management.Automation.Language.CommandAst] -and
+            $args[0].GetCommandName() -eq 'Add-Type' }, $false) | Select-Object -First 1
+        if ($addType) { . ([scriptblock]::Create($addType.Extent.Text)) }
+    }
+    $script:TagMountPoint = [uint32] 2684354563
+    $script:TagSymlink    = [uint32] 2684354572
 
     # Em $script: (e nao locais): no dirsize.ps1 estes sao PARAMETROS, que vivem
     # no scope do script. Declara-los locais aqui criaria uma sombra que nao
@@ -364,7 +388,57 @@ function Invoke-InvariantTests {
     Assert-That 'ShowExtensions=False -> Show-Ext cala-se'  (-not ($semTipos -match 'tipos:'))
     Assert-That 'toggle liga o Show-Ext'                    ($comTipos -match 'tipos:')
 
-    # --- 6. Complete chega ao CSV e ao snapshot ---
+    # --- 6. Get-FlatTop: seleccao parcial tem de dar o MESMO que ordenar tudo -
+    Reset-ScanState
+    $rTop = Get-FolderNode -DisplayPath $Tree
+    $todosNos = New-Object System.Collections.Generic.List[object]
+    $st = New-Object System.Collections.Generic.Stack[object]
+    $st.Push($rTop)
+    while ($st.Count -gt 0) { $x = $st.Pop(); if (-not [object]::ReferenceEquals($x,$rTop)) { $todosNos.Add($x) }; foreach ($c in $x.Children) { $st.Push($c) } }
+    # Contrato: a SEQUENCIA DE TAMANHOS tem de ser a mesma que ordenar tudo.
+    # Nao se compara o caminho posicao a posicao porque, havendo empates, o
+    # Sort-Object do PS 5.1 nao e estavel (o -Stable so existe no PS 6+) --
+    # a ordem dele entre iguais e arbitraria. A seleccao parcial insere por
+    # ordem de travessia, o que e deterministico; e essa a diferenca, e e
+    # deliberada.
+    foreach ($k in 1, 3, 50, 9999) {
+        $rapido = Get-FlatTop -root $rTop -n $k
+        $lento  = @($todosNos | Sort-Object Size -Descending | Select-Object -First $k)
+        $iguais = ($rapido.Count -eq $lento.Count) -and
+                  (@(0..([math]::Max($rapido.Count-1,0)) | Where-Object { $rapido.Count -gt 0 -and $rapido[$_].Size -ne $lento[$_].Size }).Count -eq 0)
+        Assert-That "Get-FlatTop n=$k : mesmos tamanhos que ordenar tudo" $iguais "(rapido=$($rapido.Count) lento=$($lento.Count))"
+        # e o mesmo CONJUNTO de pastas, nao apenas os mesmos tamanhos
+        $pr = @($rapido | ForEach-Object { $_.Path } | Sort-Object)
+        $pl = @($lento  | ForEach-Object { $_.Path } | Sort-Object)
+        Assert-That "Get-FlatTop n=$k : mesmo conjunto de pastas" `
+            ((Compare-Object $pr $pl | Measure-Object).Count -eq 0)
+    }
+    # determinismo: duas chamadas seguidas tem de dar exactamente o mesmo,
+    # empates incluidos (e o que o Sort-Object nao garante)
+    $d1 = @((Get-FlatTop -root $rTop -n 25) | ForEach-Object { $_.Path })
+    $d2 = @((Get-FlatTop -root $rTop -n 25) | ForEach-Object { $_.Path })
+    Assert-That 'Get-FlatTop e deterministico (empates incluidos)' `
+        (($d1.Count -eq $d2.Count) -and (@(0..($d1.Count-1) | Where-Object { $d1[$_] -ne $d2[$_] }).Count -eq 0))
+    Assert-That 'Get-FlatTop n=0 devolve vazio'    ((Get-FlatTop -root $rTop -n 0).Count -eq 0)
+    Assert-That 'Get-FlatTop exclui a raiz'        (@(Get-FlatTop -root $rTop -n 9999 | Where-Object { $_.Path -eq $rTop.Path }).Count -eq 0)
+    Assert-That 'Get-FlatTop -IncludeRoot inclui'  (@(Get-FlatTop -root $rTop -n 9999 -IncludeRoot | Where-Object { $_.Path -eq $rTop.Path }).Count -eq 1)
+
+    # --- 7. Compare-Snapshot rejeita ficheiros que nao sejam snapshots --------
+    # Sem isto o diff corre contra uma base vazia e relata "tudo novo", sem aviso.
+    $lixo = Join-Path $env:TEMP 'dirsize_inv_lixo.json'
+    foreach ($conteudo in '{"algo":"que nao e um snapshot"}', '{}', '[]', 'null') {
+        Set-Content -LiteralPath $lixo -Value $conteudo -Encoding UTF8
+        $r = Compare-Snapshot -root $rTop -PrevPath $lixo -WarningAction SilentlyContinue
+        Assert-That "JSON invalido rejeitado: $conteudo" ($null -eq $r) '(devolveu comparacao falsa)'
+    }
+    Set-Content -LiteralPath $lixo -Value 'isto nem json e {{{' -Encoding UTF8
+    $r = Compare-Snapshot -root $rTop -PrevPath $lixo -WarningAction SilentlyContinue
+    Assert-That 'JSON malformado rejeitado' ($null -eq $r)
+    Assert-That 'snapshot inexistente rejeitado' `
+        ($null -eq (Compare-Snapshot -root $rTop -PrevPath (Join-Path $env:TEMP 'nao_existe_xyz.json') -WarningAction SilentlyContinue))
+    Remove-Item -LiteralPath $lixo -ErrorAction SilentlyContinue
+
+    # --- 8. Complete chega ao CSV e ao snapshot ---
     Reset-ScanState
     $root2 = Get-FolderNode -DisplayPath $Tree
     $linhas = Get-FlatFolderList -root $root2
