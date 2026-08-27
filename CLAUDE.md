@@ -54,13 +54,31 @@ frozen mtimes), runs report + all exporters + a snapshot diff, normalises volati
 
 ```powershell
 .\golden.ps1 -Mode capture   # once, against known-good code -> MANIFEST.csv
-.\golden.ps1 -Mode verify    # after changes -> must print "SAIDA IDENTICA"
+.\golden.ps1 -Mode verify    # file diff: must print "SAIDA IDENTICA"
+.\golden.ps1 -Mode gui       # grid actions: 27 asserts, no window shown
+.\golden.ps1 -Mode all       # both — run this before committing
+.\golden.ps1 -Mode capture -Rebuild   # after changing the test tree
 ```
 
-It covers scan, console, CSV, JSON, HTML and compare. It does **not** cover the GUI (WinForms
-clicks aren't scriptable) — after GUI changes, launch `-Gui` manually and confirm the window
-opens, stderr is empty, and `%APPDATA%\dirsize\settings.json` is written on close (that last
-one proves the `FormClosing` closure survived).
+`verify` covers scan, console, CSV, JSON, HTML and compare. `gui` loads the script's functions
+via AST (without running its execution section), wires `$script:Ui` to a real `DataGridView`
+parented to a Form that is created but never shown (columns/rows don't materialise until the
+handle exists), and asserts on navigation, filter, sort, Top-global and row→node mapping.
+
+Two things the GUI suite depends on, easy to break by accident:
+- It sorts the view **ascending** before the drill-down assert, so row position ≠ `Idx`.
+  In default order they coincide and an `Enter-GuiRow` regression to row-position is invisible.
+- The tree contains folders named `50% desconto` and `entre [colchetes]`, and the filter
+  asserts on the **exact row matched**, not merely "didn't throw" — an unescaped `LIKE` fails
+  inside `Invoke-GuiFilter`'s `catch` and leaves the old filter in place, silently.
+
+Both were verified by mutation: breaking the sort column, the `Idx` mapping, the filter
+escaping, or the Top-global column name each makes the suite fail.
+
+Still uncovered: dialogs (`SaveFileDialog`, `FolderBrowserDialog`), clipboard, Explorer launch,
+and actual mouse/keyboard delivery. After GUI changes also launch `-Gui` once and confirm the
+window opens, stderr is empty, and `%APPDATA%\dirsize\settings.json` is written on close (that
+proves the `FormClosing` closure over `$form` survived).
 
 Syntax-check without running:
 
@@ -166,10 +184,12 @@ Everything is in `dirsize.ps1`, organized top-to-bottom as:
   holder after a script parameter**: it was `$script:Gui` and silently clobbered the `-Gui`
   switch, hence `Ui` (same trap as `$Version` → `$script:AppVersion`).
 - `Show-Gui` delegates construction to `New-GuiForm`, `Initialize-GuiPanel`, `New-GuiButtons`
-  and `New-GuiContextMenu`, but **keeps the event handlers inline**: they close over locals
-  (`$form`, `$btnFlat`, …), so moving a handler into another function breaks its closure.
-  Controls the handlers reach via `$script:Ui` can live anywhere; controls they close over
-  cannot. `New-GuiButtons` returns them for exactly this reason.
+  and `New-GuiContextMenu`. Handler **logic** lives in named functions (`Invoke-GuiFilter`,
+  `Invoke-GuiSortBySize`, `Invoke-GuiUp`, `Set-GuiFlat`, `Select-GuiRow`) so `golden.ps1 -Mode
+  gui` can call it without a window; the `Add_*` scriptblocks are thin wrappers. Handlers that
+  close over **locals** (`$form` in FormClosing/Exit, `$btnFlat` for its caption) must stay
+  inline in `Show-Gui` — moving those breaks the closure, and the file-diff suite would not
+  notice. `New-GuiButtons` returns its controls for exactly this reason.
 - Lower-bound size formatting goes through `Format-SizeQualified -Style Console|Gui|Html`
   (`>=`, `≥ `, `&ge; `). Don't hand-roll the prefix again.
 - Every node has `Complete` (bool). It is set `$false` on `enum-dir`/`enum-iter`/`attr`/`size`

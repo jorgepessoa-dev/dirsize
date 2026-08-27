@@ -1326,6 +1326,62 @@ function New-GuiContextMenu {
     return $ctx
 }
 
+# ---- Accoes da grelha -------------------------------------------------------
+# A LOGICA dos handlers vive aqui, em funcoes nomeadas, e nao dentro dos
+# scriptblocks: assim o golden.ps1 consegue exercita-la sem abrir janela.
+# Os handlers que fecham sobre variaveis LOCAIS de Show-Gui ($form, $btnFlat)
+# tem de ficar la -- ver nota em Show-Gui.
+
+# Filtro por nome (ou caminho, na vista Top global) sobre a lista atual.
+function Invoke-GuiFilter {
+    try {
+        $view = $script:Ui.Grid.DataSource.DefaultView
+        $v = $script:Ui.FilterBox.Text
+        if ([string]::IsNullOrWhiteSpace($v)) { $view.RowFilter = ''; return }
+        $esc = $v -replace "'", "''" -replace '\[', '[[]' -replace '%', '[%]' -replace '\*', '[*]'
+        $col = if ($script:Ui.Flat) { 'Caminho' } else { 'Nome' }
+        $view.RowFilter = "[$col] LIKE '%$esc%'"
+    } catch { }
+}
+
+# Ordena pela coluna oculta 'Bytes' (a 'Tamanho' e texto formatado e ordenaria
+# alfabeticamente). 1o clique = maiores primeiro; alterna a partir dai.
+function Invoke-GuiSortBySize {
+    try {
+        $cur = [string]$script:Ui.Grid.DataSource.DefaultView.Sort
+        $new = if ($cur -eq 'Bytes DESC') { 'Bytes ASC' } else { 'Bytes DESC' }
+        $script:Ui.Grid.DataSource.DefaultView.Sort = $new
+        $glyph = if ($new -eq 'Bytes DESC') { 'Descending' } else { 'Ascending' }
+        $script:Ui.Grid.Columns['Tamanho'].HeaderCell.SortGlyphDirection = $glyph
+    } catch { }
+}
+
+# Sobe um nivel. Devolve $true se subiu.
+function Invoke-GuiUp {
+    if ($script:Ui.Flat -or $script:Ui.Stack.Count -eq 0) { return $false }
+    $script:Ui.Current = $script:Ui.Stack.Pop()
+    Update-GuiGrid
+    return $true
+}
+
+# Alterna entre navegacao e vista "Top global". Devolve o novo estado.
+function Set-GuiFlat {
+    param([bool] $Flat)
+    $script:Ui.Flat = $Flat
+    Update-GuiGrid
+    return $script:Ui.Flat
+}
+
+# Selecciona a linha sob o cursor (usado pelo clique direito, para o menu de
+# contexto actuar sobre a linha certa e nao sobre a que estava seleccionada).
+function Select-GuiRow {
+    param([int] $RowIndex)
+    if ($RowIndex -lt 0) { return }
+    $script:Ui.Grid.ClearSelection()
+    $script:Ui.Grid.Rows[$RowIndex].Selected = $true
+    $script:Ui.Grid.CurrentCell = $script:Ui.Grid.Rows[$RowIndex].Cells[0]
+}
+
 function Show-Gui {
     param($root)
 
@@ -1352,43 +1408,18 @@ function Show-Gui {
         $script:Ui.Grid.ContextMenuStrip = New-GuiContextMenu
         $script:Ui.Grid.Add_CellMouseDown({
             param($s, $e)
-            if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right -and $e.RowIndex -ge 0) {
-                $script:Ui.Grid.ClearSelection()
-                $script:Ui.Grid.Rows[$e.RowIndex].Selected = $true
-                $script:Ui.Grid.CurrentCell = $script:Ui.Grid.Rows[$e.RowIndex].Cells[0]
-            }
+            if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) { Select-GuiRow $e.RowIndex }
         })
 
         $form.Controls.AddRange(@($script:Ui.Lbl, $lblFil, $script:Ui.FilterBox, $script:Ui.Grid, $script:Ui.BtnUp, $btnFlat, $btnOpen, $btnCopy, $btnCsv, $btnExit, $hint))
 
-        # Filtro por nome (ou caminho, na vista Top global) sobre a lista atual.
-        $script:Ui.FilterBox.Add_TextChanged({
-            try {
-                $view = $script:Ui.Grid.DataSource.DefaultView
-                $v = $script:Ui.FilterBox.Text
-                if ([string]::IsNullOrWhiteSpace($v)) { $view.RowFilter = '' ; return }
-                $esc = $v -replace "'", "''" -replace '\[', '[[]' -replace '%', '[%]' -replace '\*', '[*]'
-                $col = if ($script:Ui.Flat) { 'Caminho' } else { 'Nome' }
-                $view.RowFilter = "[$col] LIKE '%$esc%'"
-            } catch { }
-        })
-
+        $script:Ui.FilterBox.Add_TextChanged({ Invoke-GuiFilter })
         $script:Ui.Grid.Add_CellDoubleClick({ param($s, $e) Enter-GuiRow $e.RowIndex })
-        # Ordenacao correcta da coluna "Tamanho" (texto formatado) -> ordena pela
-        # coluna oculta 'Bytes'. 1o clique = maiores primeiro; alterna depois.
         $script:Ui.Grid.Add_ColumnHeaderMouseClick({
             param($s, $e)
             if ($e.ColumnIndex -lt 0) { return }
             if ($script:Ui.Grid.Columns[$e.ColumnIndex].Name -ne 'Tamanho') { return }
-            try {
-                $cur = [string]$script:Ui.Grid.DataSource.DefaultView.Sort
-                $new = if ($cur -eq 'Bytes DESC') { 'Bytes ASC' } else { 'Bytes DESC' }
-                $script:Ui.Grid.DataSource.DefaultView.Sort = $new
-                $glyph = if ($new -eq 'Bytes DESC') { 'Descending' } else { 'Ascending' }
-#endregion
-
-                $script:Ui.Grid.Columns['Tamanho'].HeaderCell.SortGlyphDirection = $glyph
-            } catch { }
+            Invoke-GuiSortBySize
         })
         $script:Ui.Grid.Add_KeyDown({
             param($s, $e)
@@ -1397,22 +1428,16 @@ function Show-Gui {
                 $e.Handled = $true
             }
             elseif ($e.KeyCode -eq [System.Windows.Forms.Keys]::Back) {
-                if (-not $script:Ui.Flat -and $script:Ui.Stack.Count -gt 0) {
-                    $script:Ui.Current = $script:Ui.Stack.Pop(); Update-GuiGrid
-                }
+                [void](Invoke-GuiUp)
                 $e.Handled = $true
             }
         })
-        $script:Ui.BtnUp.Add_Click({
-            if ($script:Ui.Stack.Count -gt 0) {
-                $script:Ui.Current = $script:Ui.Stack.Pop()
-                Update-GuiGrid
-            }
-        })
+        $script:Ui.BtnUp.Add_Click({ [void](Invoke-GuiUp) })
+        # Fecha sobre $btnFlat (local) -> tem de ficar inline; a mudanca de estado
+        # em si esta em Set-GuiFlat, que o golden.ps1 testa.
         $btnFlat.Add_Click({
-            $script:Ui.Flat = -not $script:Ui.Flat
-            $btnFlat.Text = if ($script:Ui.Flat) { 'Navegar' } else { 'Top global' }
-            Update-GuiGrid
+            $on = Set-GuiFlat (-not $script:Ui.Flat)
+            $btnFlat.Text = if ($on) { 'Navegar' } else { 'Top global' }
         })
         $btnOpen.Add_Click({ $n = Get-GuiSelectedNode; if ($n) { Invoke-OpenInExplorer $n.Path } })
         $btnCopy.Add_Click({ $n = Get-GuiSelectedNode; if ($n) { Copy-PathToClipboard $n.Path } })
@@ -1436,7 +1461,9 @@ function Show-Gui {
         Start-Interactive -root $root -top $Top
     }
 }
+#endregion
 
+#region Execucao
 # ----------------------------------------------------------------------------
 # Execucao
 # ----------------------------------------------------------------------------
@@ -1573,3 +1600,4 @@ if ($script:Scan.ErrCount -gt 0) {
 }
 
 if ($script:Scan.Partial) { exit 2 }
+#endregion
