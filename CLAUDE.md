@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A PowerShell script (`Analyze-FolderSizes.ps1`) that measures disk usage of a folder tree
+A PowerShell script (`Measure-FolderSizes.ps1`) that measures disk usage of a folder tree
 (local or `\\server\share`) without requiring admin rights, and handles paths longer than 260
 characters (MAX_PATH). It scans once into an in-memory tree, then offers three ways to browse
 the result: a WinForms GUI (`-Gui`, TreeSize-style drill-down), an interactive console mode
@@ -34,28 +34,28 @@ directly under Windows PowerShell 5.1:
 
 ```powershell
 # report mode + every exporter, no GUI (progress window suppressed)
-.\Analyze-FolderSizes.ps1 -Path . -Depth 2 -Top 10 -FlatTop 20 -ShowExtensions -NoProgressGui `
+.\Measure-FolderSizes.ps1 -Path . -Depth 2 -Top 10 -FlatTop 20 -ShowExtensions -NoProgressGui `
   -CsvOut out.csv -HtmlOut out.html -SnapshotOut snap.json
 
 # snapshot diff (run once to make snap.json, change something, run again)
-.\Analyze-FolderSizes.ps1 -Path . -Depth 1 -NoProgressGui -CompareWith snap.json -HtmlOut evol.html
+.\Measure-FolderSizes.ps1 -Path . -Depth 1 -NoProgressGui -CompareWith snap.json -HtmlOut evol.html
 
 # GUI path (scan progress window + navigation window)
-.\Analyze-FolderSizes.ps1 -Path . -Gui
+.\Measure-FolderSizes.ps1 -Path . -Gui
 
 # if execution policy blocks local scripts, run without changing system settings
-powershell -ExecutionPolicy Bypass -File .\Analyze-FolderSizes.ps1 -Path .
+powershell -ExecutionPolicy Bypass -File .\Measure-FolderSizes.ps1 -Path .
 ```
 
 Syntax-check without running:
 
 ```powershell
-[System.Management.Automation.Language.Parser]::ParseFile('Analyze-FolderSizes.ps1', [ref]$null, [ref]$null)
+[System.Management.Automation.Language.Parser]::ParseFile('Measure-FolderSizes.ps1', [ref]$null, [ref]$null)
 ```
 
 ## Architecture
 
-Everything is in `Analyze-FolderSizes.ps1`, organized top-to-bottom as:
+Everything is in `Measure-FolderSizes.ps1`, organized top-to-bottom as:
 
 1. **Helpers** — `ConvertTo-ExtendedPath` (adds the `\\?\` / `\\?\UNC\` prefix to bypass
    MAX_PATH), `Format-Size`, `Test-Excluded` (wildcard folder exclusion), and the
@@ -151,5 +151,5 @@ Everything is in `Analyze-FolderSizes.ps1`, organized top-to-bottom as:
 
 ## Repo contents
 
-`Analyze-FolderSizes.ps1` (the script), `Analisar-Pastas.cmd` (double-click launcher),
+`Measure-FolderSizes.ps1` (the script), `Analisar-Pastas.cmd` (double-click launcher),
 `README.md`, `LICENSE`. Nothing else — the old `tools/` review helpers were removed.

@@ -70,23 +70,23 @@
     Mostra a versao e sai.
 
 .EXAMPLE
-    .\Analyze-FolderSizes.ps1
+    .\Measure-FolderSizes.ps1
     # sem argumentos: janela para ESCOLHER a pasta (com historico) e resultados em janela
 
 .EXAMPLE
-    .\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -Gui
+    .\Measure-FolderSizes.ps1 -Path '\\servidor\share' -Gui
     # scan (com janela de progresso + Cancelar) + JANELA GRAFICA para navegar
 
 .EXAMPLE
-    .\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -Depth 2 -Top 20 -FlatTop 50
+    .\Measure-FolderSizes.ps1 -Path '\\servidor\share' -Depth 2 -Top 20 -FlatTop 50
     # relatorio de 2 niveis + as 50 maiores pastas de toda a arvore
 
 .EXAMPLE
-    .\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -HtmlOut rel.html -SnapshotOut hoje.json
+    .\Measure-FolderSizes.ps1 -Path '\\servidor\share' -HtmlOut rel.html -SnapshotOut hoje.json
     # relatorio HTML + snapshot para comparar no futuro
 
 .EXAMPLE
-    .\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -CompareWith mes-passado.json -HtmlOut evolucao.html
+    .\Measure-FolderSizes.ps1 -Path '\\servidor\share' -CompareWith mes-passado.json -HtmlOut evolucao.html
     # o que mudou desde o snapshot anterior
 #>
 [CmdletBinding()]
@@ -110,7 +110,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $script:AppVersion = '2.0'
 
-if ($Version) { Write-Host "Analyze-FolderSizes v$($script:AppVersion)"; exit 0 }
+if ($Version) { Write-Host "Measure-FolderSizes v$($script:AppVersion)"; exit 0 }
 
 # ----------------------------------------------------------------------------
 # Definicoes / estado da app (historico de caminhos, tamanho da janela),
