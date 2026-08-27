@@ -530,6 +530,13 @@ function Get-FolderNode {
         Add-ScanError 'enum-iter' $DisplayPath $_
         $node.Complete = $false
     }
+
+    # O cancelamento sai do foreach por 'break', nao por excepcao: o catch acima
+    # NAO corre. Sem isto, uma pasta interrompida a meio (sobretudo se o que
+    # faltava eram ficheiros, que nao criam filhos para propagar) regressava com
+    # Complete = $true e numeros parciais.
+    if ($script:Scan.CancelRequested) { $node.Complete = $false }
+
     return $node
 }
 

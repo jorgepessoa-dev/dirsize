@@ -6,7 +6,7 @@
 # 'capture'/'verify' comparam a saida NORMALIZADA (sem tempos/datas/caminhos
 # volateis). 'gui' faz asserts sobre uma DataGridView real que nunca e mostrada.
 param(
-    [ValidateSet('capture','verify','gui','all')] [string] $Mode = 'verify',
+    [ValidateSet('capture','verify','gui','invariants','all')] [string] $Mode = 'verify',
     [string] $Script = (Join-Path $PSScriptRoot 'dirsize.ps1'),
     [string] $Root   = (Join-Path $env:TEMP 'dirsize_golden'),
     [switch] $Rebuild   # forca reconstrucao da arvore de teste
@@ -235,8 +235,102 @@ function Invoke-GuiTests {
     return $false
 }
 
+# ============================================================================
+# MODO invariants - semantica de Complete (cobertura, propagacao, cancelamento)
+# ============================================================================
+# Complete e uma invariante epistemologica: False significa "estes numeros sao
+# minimos". Se deixar de propagar, o CSV passa a afirmar exactidao que nao tem
+# -- e isso nao aparece num diff de ficheiros se a arvore de teste nao provocar
+# o caso. Por isso testa-se aqui, directamente.
+function Invoke-InvariantTests {
+    param([string] $ScriptPath, [string] $Tree)
+
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$null, [ref]$null)
+    $fns = $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)
+    foreach ($f in $fns) { . ([scriptblock]::Create($f.Extent.Text)) }
+
+    $Exclude = @(); $ShowExtensions = $false
+    $script:CategoryMap = @{}
+    function Reset-ScanState {
+        param([int] $LastReport = 0)
+        $script:Scan = [pscustomobject]@{
+            ErrCount = 0; Errors = (New-Object System.Collections.Generic.List[string])
+            DeniedDirs = (New-Object System.Collections.Generic.List[string])
+            DeniedItems = (New-Object System.Collections.Generic.List[string])
+            LongPaths = (New-Object System.Collections.Generic.List[object])
+            Count = 0; LastReport = $LastReport; SkipReparse = 0
+            CancelRequested = $false; Partial = $false
+        }
+        $script:Prog = [pscustomobject]@{ Form=$null; LblPath=$null; LblStats=$null; Sw=$null; Closing=$false }
+    }
+
+    $script:__p = 0; $script:__f = 0
+    function Assert-That {
+        param([string] $Name, [bool] $Cond, [string] $Detail = '')
+        if ($Cond) { Write-Host "  ok    $Name" -ForegroundColor Green; $script:__p++ }
+        else       { Write-Host "  FALHA $Name $Detail" -ForegroundColor Red; $script:__f++ }
+    }
+
+    Write-Host 'Invariantes - semantica de Complete' -ForegroundColor Cyan
+
+    # --- 1. pasta sem acesso -> False, e propaga ate a raiz ---
+    Reset-ScanState
+    $root = Get-FolderNode -DisplayPath $Tree
+    $todos = Get-FlatFolderList -root $root
+    $negada = @($todos | Where-Object { $_.Path -like '*Docs\Priv' })[0]
+    $pai    = @($todos | Where-Object { $_.Path -like '*\Docs' })[0]
+    $raiz   = @($todos | Where-Object { $_.Path -eq $root.Path })[0]
+    Assert-That 'pasta sem acesso -> Complete=False'        ($negada -and -not $negada.Complete)
+    Assert-That 'pai da pasta sem acesso -> False'          ($pai    -and -not $pai.Complete)
+    Assert-That 'raiz -> False (propagou ate ao topo)'      ($raiz   -and -not $raiz.Complete)
+    $sas = @($todos | Where-Object { $_.Path -like '*\Fotos' })[0]
+    Assert-That 'ramo intacto continua Complete=True'       ($sas -and $sas.Complete) `
+        '(senao o False alastra a tudo e perde utilidade)'
+    Assert-That 'ha ramos True e ramos False'               ((@($todos | ? { $_.Complete }).Count -gt 0) -and (@($todos | ? { -not $_.Complete }).Count -gt 0))
+    Assert-That 'Get-IncompleteCount conta os False'        ((Get-IncompleteCount -root $root) -eq @($todos | ? { -not $_.Complete }).Count)
+
+    # --- 2. cancelamento a meio de uma pasta so com ficheiros ---
+    # (o 'break' sai do foreach sem excepcao -> o catch enum-iter nao corre, e
+    #  nao ha filhos para propagar. Regressao classica.)
+    $tmp = Join-Path $env:TEMP 'dirsize_inv_cancel'
+    if (Test-Path $tmp) { [System.IO.Directory]::Delete($tmp, $true) }
+    $null = New-Item -ItemType Directory -Force $tmp
+    1..6 | ForEach-Object { Set-Content (Join-Path $tmp "f$_.txt") ('x' * 1000) }
+    Reset-ScanState -LastReport -999999      # forca o hook de progresso a cada entrada
+    $script:Prog.Form = 'fake'
+    function Update-ProgressWindow { param([string] $currentPath) $script:Scan.CancelRequested = $true }
+    $parcial = Get-FolderNode -DisplayPath $tmp
+    Assert-That 'cancelamento -> leitura mesmo parcial'  ($parcial.FileCount -lt 6) "(leu $($parcial.FileCount)/6)"
+    Assert-That 'cancelamento -> Complete=False'         (-not $parcial.Complete)
+    [System.IO.Directory]::Delete($tmp, $true)
+
+    # --- 3. cancelamento antes de entrar na pasta ---
+    Reset-ScanState
+    $script:Scan.CancelRequested = $true
+    $nada = Get-FolderNode -DisplayPath $Tree
+    Assert-That 'cancelado a entrada -> Complete=False'  (-not $nada.Complete)
+
+    # --- 4. Complete chega ao CSV e ao snapshot ---
+    Reset-ScanState
+    $root2 = Get-FolderNode -DisplayPath $Tree
+    $linhas = Get-FlatFolderList -root $root2
+    Assert-That 'CSV expoe a coluna Complete' ($linhas[0].PSObject.Properties.Name -contains 'Complete')
+    Assert-That 'Format-SizeQualified marca os minimos' `
+        ((Format-SizeQualified $root2) -like '>=*' -and (Format-SizeQualified $root2 -Style Html) -like '&ge;*')
+    $completo = [pscustomobject]@{ Size = 100; Complete = $true }
+    Assert-That 'Format-SizeQualified nao marca os exactos' ((Format-SizeQualified $completo) -notlike '>=*')
+
+    Write-Host ''
+    if ($script:__f -eq 0) { Write-Host "Invariantes: $($script:__p) asserts, todos ok" -ForegroundColor Green; return $true }
+    Write-Host "Invariantes: $($script:__f) de $($script:__p + $script:__f) asserts falharam" -ForegroundColor Red
+    return $false
+}
+
 if ($Mode -eq 'gui') {
     if (Invoke-GuiTests -ScriptPath $Script -Tree $tree) { exit 0 } else { exit 1 }
+}
+if ($Mode -eq 'invariants') {
+    if (Invoke-InvariantTests -ScriptPath $Script -Tree $tree) { exit 0 } else { exit 1 }
 }
 
 $out  = Join-Path $Root ($(if ($Mode -eq 'all') { 'verify' } else { $Mode }))
@@ -244,13 +338,25 @@ if (Test-Path $out) { [System.IO.Directory]::Delete($out, $true) }
 $null = New-Item -ItemType Directory -Force $out
 
 # --- corridas que exercitam todas as vistas e exportadores ---
+# Cada corrida verifica o exit code: um ficheiro pode continuar a ser produzido
+# com o script a terminar mal, e o hash sozinho nao diria porque.
+function Assert-ExitOk {
+    param([string] $Que)
+    # 0 = ok. 2 = scan cancelado; nao esperado aqui (nada cancela estas corridas).
+    if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) {
+        throw "$Que : dirsize.ps1 terminou com exit code $LASTEXITCODE"
+    }
+}
+
 & $Script -Path $tree -Depth 3 -Top 20 -FlatTop 30 -ShowExtensions -NoProgressGui `
     -CsvOut (Join-Path $out 'gold.csv') -SnapshotOut (Join-Path $out 'gold.json') `
     -HtmlOut (Join-Path $out 'gold.html') *>&1 |
     Out-String | Set-Content (Join-Path $out 'console.txt') -Encoding UTF8
+Assert-ExitOk 'corrida principal'
 
 & $Script -Path $tree -Depth 1 -NoProgressGui -CompareWith (Join-Path $out 'gold.json') *>&1 |
     Out-String | Set-Content (Join-Path $out 'compare.txt') -Encoding UTF8
+Assert-ExitOk 'comparacao de snapshots'
 
 & $Script -Path $tree -Depth 2 -Top 5 -NoProgressGui *>&1 |
     Out-String | Set-Content (Join-Path $out 'report.txt') -Encoding UTF8
@@ -301,6 +407,8 @@ if ($bad -eq 0) {
 }
 
 if ($Mode -eq 'all') {
+    Write-Host ''
+    if (-not (Invoke-InvariantTests -ScriptPath $Script -Tree $tree)) { $bad++ }
     Write-Host ''
     if (-not (Invoke-GuiTests -ScriptPath $Script -Tree $tree)) { $bad++ }
 }

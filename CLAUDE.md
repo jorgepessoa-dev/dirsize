@@ -53,14 +53,24 @@ frozen mtimes), runs report + all exporters + a snapshot diff, normalises volati
 (durations, timestamps, output paths) and compares SHA-256 per artifact:
 
 ```powershell
-.\golden.ps1 -Mode capture   # once, against known-good code -> MANIFEST.csv
-.\golden.ps1 -Mode verify    # file diff: must print "SAIDA IDENTICA"
-.\golden.ps1 -Mode gui       # grid actions: 27 asserts, no window shown
-.\golden.ps1 -Mode all       # both — run this before committing
+.\golden.ps1 -Mode capture     # once, against known-good code -> MANIFEST.csv
+.\golden.ps1 -Mode verify      # file diff: must print "SAIDA IDENTICA"
+.\golden.ps1 -Mode invariants  # Complete semantics: 12 asserts
+.\golden.ps1 -Mode gui         # grid actions: 27 asserts, no window shown
+.\golden.ps1 -Mode all         # all three — run this before committing
 .\golden.ps1 -Mode capture -Rebuild   # after changing the test tree
 ```
 
-`verify` covers scan, console, CSV, JSON, HTML and compare. `gui` loads the script's functions
+`verify` covers scan, console, CSV, JSON, HTML and compare, and fails loudly if `dirsize.ps1`
+returns a non-zero exit code (a file can still be written by a run that ended badly).
+
+`invariants` tests `Complete` directly, because a file diff only catches what the fixed test
+tree happens to provoke: denied folder → `False`, propagation to parent and root, untouched
+branches staying `True`, `Get-IncompleteCount`, both cancel paths, and the `≥` marker. It was
+mutation-verified against dropping the cancel guard, dropping the child→parent propagation,
+dropping the `enum-dir` marking, and dropping the `≥` prefix.
+
+`gui` loads the script's functions
 via AST (without running its execution section), wires `$script:Ui` to a real `DataGridView`
 parented to a Form that is created but never shown (columns/rows don't materialise until the
 handle exists), and asserts on navigation, filter, sort, Top-global and row→node mapping.
@@ -194,6 +204,11 @@ Everything is in `dirsize.ps1`, organized top-to-bottom as:
   (`>=`, `≥ `, `&ge; `). Don't hand-roll the prefix again.
 - Every node has `Complete` (bool). It is set `$false` on `enum-dir`/`enum-iter`/`attr`/`size`
   failure and on cancel, and **propagates to ancestors** (`if (-not $child.Complete) { $node.Complete = $false }`).
+  Cancellation needs its **own** check just before `return $node`: the cancel path leaves the
+  loop via `break`, so no exception is raised and the `enum-iter` catch never runs. Without it,
+  a folder interrupted mid-enumeration returns `Complete = $true` with partial numbers —
+  invisible when the remaining entries were files, since files create no child to propagate
+  from. Covered by `golden.ps1 -Mode invariants`.
   `$false` means Size/FileCount/… are lower bounds. Surfaced as CSV column `Complete`, snapshot
   `c`, the summary `Cobertura:` line (via `Get-IncompleteCount`), and a `≥` prefix on affected
   sizes in console/GUI/HTML. `Compare-Snapshot` only reads path→bytes, so it is unaffected.
