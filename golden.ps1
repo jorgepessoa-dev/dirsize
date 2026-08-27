@@ -249,7 +249,10 @@ function Invoke-InvariantTests {
     $fns = $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)
     foreach ($f in $fns) { . ([scriptblock]::Create($f.Extent.Text)) }
 
-    $Exclude = @(); $ShowExtensions = $false
+    # Em $script: (e nao locais): no dirsize.ps1 estes sao PARAMETROS, que vivem
+    # no scope do script. Declara-los locais aqui criaria uma sombra que nao
+    # existe na realidade e faria os testes medir a coisa errada.
+    $script:Exclude = @(); $script:ShowExtensions = $false
     $script:CategoryMap = @{}
     function Reset-ScanState {
         param([int] $LastReport = 0)
@@ -310,7 +313,58 @@ function Invoke-InvariantTests {
     $nada = Get-FolderNode -DisplayPath $Tree
     Assert-That 'cancelado a entrada -> Complete=False'  (-not $nada.Complete)
 
-    # --- 4. Complete chega ao CSV e ao snapshot ---
+    # --- 4. caminhos longos: os METADADOS tem mesmo de ser lidos -------------
+    # EnumerateFileSystemEntries devolve as entradas ja com o prefixo \\?\ (por
+    # se lhe ter passado a raiz em extended), por isso GetAttributes/FileInfo
+    # funcionam. Quem "corrigir" isto convertendo $entry outra vez (prefixo
+    # duplicado) ou passando a raiz sem prefixo faz os tamanhos cair para 0 sem
+    # erro visivel -- dai este teste medir o tamanho, nao so a presenca.
+    Reset-ScanState
+    $rootLp = Get-FolderNode -DisplayPath $Tree
+    $lp = @($script:Scan.LongPaths | Where-Object { $_.Type -eq 'Ficheiro' })
+    Assert-That 'ficheiro com caminho >260 foi encontrado' ($lp.Count -ge 1)
+    if ($lp.Count -ge 1) {
+        Assert-That 'caminho longo tem mesmo >260 caracteres' ($lp[0].Length -gt 260) "(len=$($lp[0].Length))"
+        # tamanho real lido em separado (via \\?\) -> nao depende de o construtor
+        # da arvore acrescentar ou nao newline
+        $realSz = ([System.IO.FileInfo]('\\?\' + $lp[0].Path)).Length
+        Assert-That 'tamanho do ficheiro longo foi LIDO (nao 0)' `
+            ($lp[0].Size -gt 0 -and $lp[0].Size -eq $realSz) "(scan=$($lp[0].Size) disco=$realSz)"
+    }
+    $folhaLonga = @(Get-FlatFolderList -root $rootLp | Where-Object { $_.Path.Length -gt 260 -and $_.Files -ge 1 })
+    Assert-That 'pasta profunda contabiliza o ficheiro' ($folhaLonga.Count -ge 1 -and $folhaLonga[0].SizeBytes -gt 0)
+    Assert-That 'ramo longo fica Complete=True (metadados lidos)' `
+        ($folhaLonga.Count -ge 1 -and $folhaLonga[0].Complete) '(False => leitura de metadados falhou)'
+
+    # O prefixo extended esta MESMO a ser usado? Nesta maquina os testes acima
+    # passariam sem ele (LongPathsEnabled=1 no Windows), por isso e preciso um
+    # sinal directo: a mensagem de erro da pasta negada cita o caminho que foi
+    # entregue a API. Se la aparecer \\?\, ConvertTo-ExtendedPath esta na cadeia.
+    $msgNegada = @($script:Scan.Errors | Where-Object { $_ -like '*enum-dir*' })
+    Assert-That 'enumeracao usa o prefixo extended (\\?\)' `
+        ($msgNegada.Count -ge 1 -and $msgNegada[0] -like '*\\?\*') "($($msgNegada[0]))"
+
+    # ConvertTo-ExtendedPath: idempotente de proposito. Aplicar duas vezes tem
+    # de ser inofensivo -- e o que torna inocua a "correccao" de reprefixar
+    # entradas que ja vem prefixadas da enumeracao.
+    Assert-That 'ConvertTo-ExtendedPath local'      ((ConvertTo-ExtendedPath 'C:\a\b') -eq '\\?\C:\a\b')
+    Assert-That 'ConvertTo-ExtendedPath UNC'        ((ConvertTo-ExtendedPath '\\srv\share\x') -eq '\\?\UNC\srv\share\x')
+    Assert-That 'ConvertTo-ExtendedPath idempotente' `
+        ((ConvertTo-ExtendedPath (ConvertTo-ExtendedPath 'C:\a\b')) -eq '\\?\C:\a\b')
+
+    # --- 5. o comando [e] da consola afecta mesmo o Show-Ext ----------------
+    # $ShowExtensions e parametro do script: $script:ShowExtensions e a MESMA
+    # variavel, e o Show-Ext le-a sem qualificar.
+    $noFake = [pscustomobject]@{ Ext = @{ '.zip' = 1000 } }
+    $script:CategoryMap = @{ '.zip' = 'Comprimido/Bkp' }
+    $script:ShowExtensions = $false
+    $semTipos = (Show-Ext -node $noFake 6>&1 | Out-String)
+    $script:ShowExtensions = -not $script:ShowExtensions
+    $comTipos = (Show-Ext -node $noFake 6>&1 | Out-String)
+    Assert-That 'ShowExtensions=False -> Show-Ext cala-se'  (-not ($semTipos -match 'tipos:'))
+    Assert-That 'toggle liga o Show-Ext'                    ($comTipos -match 'tipos:')
+
+    # --- 6. Complete chega ao CSV e ao snapshot ---
     Reset-ScanState
     $root2 = Get-FolderNode -DisplayPath $Tree
     $linhas = Get-FlatFolderList -root $root2

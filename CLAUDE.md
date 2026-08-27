@@ -55,7 +55,7 @@ frozen mtimes), runs report + all exporters + a snapshot diff, normalises volati
 ```powershell
 .\golden.ps1 -Mode capture     # once, against known-good code -> MANIFEST.csv
 .\golden.ps1 -Mode verify      # file diff: must print "SAIDA IDENTICA"
-.\golden.ps1 -Mode invariants  # Complete semantics: 12 asserts
+.\golden.ps1 -Mode invariants  # Complete + long paths + toggles: 23 asserts
 .\golden.ps1 -Mode gui         # grid actions: 27 asserts, no window shown
 .\golden.ps1 -Mode all         # all three — run this before committing
 .\golden.ps1 -Mode capture -Rebuild   # after changing the test tree
@@ -64,11 +64,13 @@ frozen mtimes), runs report + all exporters + a snapshot diff, normalises volati
 `verify` covers scan, console, CSV, JSON, HTML and compare, and fails loudly if `dirsize.ps1`
 returns a non-zero exit code (a file can still be written by a run that ended badly).
 
-`invariants` tests `Complete` directly, because a file diff only catches what the fixed test
-tree happens to provoke: denied folder → `False`, propagation to parent and root, untouched
-branches staying `True`, `Get-IncompleteCount`, both cancel paths, and the `≥` marker. It was
-mutation-verified against dropping the cancel guard, dropping the child→parent propagation,
-dropping the `enum-dir` marking, and dropping the `≥` prefix.
+`invariants` tests properties a file diff only catches by luck: `Complete` (denied folder →
+`False`, propagation to parent and root, untouched branches staying `True`,
+`Get-IncompleteCount`, both cancel paths, the `≥` marker), long-path metadata actually being
+read, the extended prefix reaching the API, `ConvertTo-ExtendedPath` idempotency, and the
+console `e` toggle reaching `Show-Ext`. Mutation-verified against dropping the cancel guard,
+the child→parent propagation, the `enum-dir` marking, the `≥` prefix, and the extended prefix
+on the enumeration root.
 
 `gui` loads the script's functions
 via AST (without running its execution section), wires `$script:Ui` to a real `DataGridView`
@@ -85,8 +87,11 @@ Two things the GUI suite depends on, easy to break by accident:
 Both were verified by mutation: breaking the sort column, the `Idx` mapping, the filter
 escaping, or the Top-global column name each makes the suite fail.
 
-Still uncovered: dialogs (`SaveFileDialog`, `FolderBrowserDialog`), clipboard, Explorer launch,
-and actual mouse/keyboard delivery. After GUI changes also launch `-Gui` once and confirm the
+Known gaps, deliberately: the `'size'` error path (a file that enumerates but whose
+`FileInfo.Length` throws) is untested — arranging one needs ACL edits that require
+`SeSecurityPrivilege`, which a non-admin dev box does not have. Dialogs (`SaveFileDialog`,
+`FolderBrowserDialog`), clipboard, Explorer launch,
+and actual mouse/keyboard delivery are also uncovered. After GUI changes also launch `-Gui` once and confirm the
 window opens, stderr is empty, and `%APPDATA%\dirsize\settings.json` is written on close (that
 proves the `FormClosing` closure over `$form` survived).
 
@@ -154,6 +159,16 @@ Everything is in `dirsize.ps1`, organized top-to-bottom as:
   filesystem — they only re-render the tree already in memory.
 - All filesystem paths passed to `System.IO` APIs must go through `ConvertTo-ExtendedPath` to
   keep long-path support working, including in any new code path that touches the filesystem.
+  **`EnumerateFileSystemEntries` given a `\\?\` root returns entries that already carry the
+  prefix**, so `$entry` inside the scan loop is already extended — `GetAttributes`,
+  `[System.IO.FileInfo]` and `Test-IsJunctionOrSymlink` are correct as written (verified on a
+  382-char path). Re-prefixing `$entry` is a no-op rather than a bug, because
+  `ConvertTo-ExtendedPath` returns its input unchanged when it already starts with `\\?\`;
+  keep that idempotency. What is **not** optional is the prefix on the root: drop it and long
+  paths break on any machine where Windows' `LongPathsEnabled` is 0 — which is the default,
+  and the assumption for the target corporate estate. Note the dev machine here has it set to
+  1, so long-path tests pass either way; the suite therefore asserts the prefix directly, by
+  checking that the denied-folder error message quotes a `\\?\` path.
 - Code must run under **Windows PowerShell 5.1** (.NET Framework, STA console). Avoid
   PowerShell-7-only syntax/APIs (`ForEach-Object -Parallel`, `??`, ternary, `-AsHashtable`,
   etc.). Clipboard/WinForms rely on the 5.1 console being STA.

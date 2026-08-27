@@ -666,8 +666,10 @@ function Start-Interactive {
             if ($stack.Count -gt 0) { $current = $stack.Pop() } else { Write-Host 'Ja estas no topo.' -ForegroundColor DarkGray }
         }
         elseif ($ans -eq 'e') {
+            # $ShowExtensions e parametro do script, logo VIVE no scope do script:
+            # $script:ShowExtensions e a mesma variavel. O Show-Ext le-a sem
+            # qualificar e resolve-a pela cadeia de scopes -- esta linha basta.
             $script:ShowExtensions = -not $script:ShowExtensions
-            Set-Variable -Name ShowExtensions -Value $script:ShowExtensions -Scope 1 -ErrorAction SilentlyContinue
         }
         elseif ($ans -eq 't') {
             $n = if ($FlatTop -gt 0) { $FlatTop } else { 50 }
