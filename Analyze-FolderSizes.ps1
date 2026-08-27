@@ -286,6 +286,77 @@ function Start-Interactive {
     }
 }
 
+# Achata a arvore e exporta para CSV (uma linha por pasta, maiores primeiro).
+# Iterativo (sem recursao) para aguentar arvores muito profundas.
+function Export-TreeCsv {
+    param($node, [string] $CsvPath)
+    $rows  = New-Object System.Collections.Generic.List[object]
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push($node)
+    while ($stack.Count -gt 0) {
+        $n = $stack.Pop()
+        $rows.Add([pscustomobject]@{
+            Path = $n.Path; SizeBytes = $n.Size; Size = (Format-Size $n.Size)
+            Files = $n.FileCount; SubDirs = $n.DirCount })
+        foreach ($c in $n.Children) { $stack.Push($c) }
+    }
+    $rows | Sort-Object SizeBytes -Descending |
+        Export-Csv -LiteralPath $CsvPath -NoTypeInformation -Encoding UTF8
+}
+
+# Reconstroi a grelha a partir do no atual (instantaneo: a arvore ja esta em
+# memoria). Funcao de TOPO + estado em $script: -> chamavel dos event handlers
+# do WinForms sem os problemas de scope das funcoes aninhadas.
+function Update-GuiGrid {
+    $node = $script:GuiCurrent
+    $script:GuiNodes = @($node.Children | Sort-Object Size -Descending)
+
+    $dt = New-Object System.Data.DataTable
+    [void]$dt.Columns.Add('Nome', [string])
+    [void]$dt.Columns.Add('Tamanho', [string])
+    [void]$dt.Columns.Add('%', [double])
+    [void]$dt.Columns.Add('Ficheiros', [int])
+    [void]$dt.Columns.Add('Subpastas', [int])
+    [void]$dt.Columns.Add('Tipos', [string])
+    [void]$dt.Columns.Add('Idx', [int])
+
+    $i = 0
+    foreach ($c in $script:GuiNodes) {
+        $pct = 0.0
+        if ($node.Size -gt 0) { $pct = [math]::Round(($c.Size / $node.Size) * 100, 1) }
+        $tipos = ''
+        if ($c.Ext.Count -gt 0) {
+            $tp = $c.Ext.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 3 |
+                  ForEach-Object { $_.Key }
+            $tipos = ($tp -join ', ')
+        }
+        [void]$dt.Rows.Add($c.Name, (Format-Size $c.Size), $pct, $c.FileCount, $c.DirCount, $tipos, $i)
+        $i++
+    }
+
+    $script:GuiGrid.DataSource = $dt
+    if ($script:GuiGrid.Columns['Idx'])   { $script:GuiGrid.Columns['Idx'].Visible = $false }
+    if ($script:GuiGrid.Columns['Nome'])  { $script:GuiGrid.Columns['Nome'].FillWeight = 240 }
+    if ($script:GuiGrid.Columns['Tipos']) { $script:GuiGrid.Columns['Tipos'].FillWeight = 180 }
+
+    $script:GuiLbl.Text = ('{0}    —    Total: {1}  |  {2} ficheiros  |  {3} subpastas' -f `
+        $node.Path, (Format-Size $node.Size), $node.FileCount, $node.DirCount)
+    $script:GuiBtnUp.Enabled = ($script:GuiStack.Count -gt 0)
+}
+
+# Entra no no correspondente a uma linha da grelha (via coluna Idx -> robusto a ordenacao).
+function Enter-GuiRow {
+    param([int] $rowIndex)
+    if ($rowIndex -lt 0) { return }
+    $idx = [int]$script:GuiGrid.Rows[$rowIndex].Cells['Idx'].Value
+    $target = $script:GuiNodes[$idx]
+    if ($target.Children.Count -gt 0) {
+        $script:GuiStack.Push($script:GuiCurrent)
+        $script:GuiCurrent = $target
+        Update-GuiGrid
+    }
+}
+
 # ----------------------------------------------------------------------------
 # Janela grafica (WinForms) sobre a arvore JA em memoria -> navegacao instantanea.
 # Nao precisa de admin. Funciona em PowerShell 5.1 e 7+ num ambiente com desktop
@@ -294,166 +365,98 @@ function Start-Interactive {
 function Show-Gui {
     param($root)
 
+    # Toda a construcao da janela protegida: numa maquina sem subsistema grafico
+    # (ex.: Server Core) qualquer passo pode falhar -> cai para o modo consola.
     try {
         Add-Type -AssemblyName System.Windows.Forms
         Add-Type -AssemblyName System.Drawing
+
+        $script:GuiCurrent = $root
+        $script:GuiStack   = New-Object System.Collections.Generic.Stack[object]
+        $script:GuiNodes   = @()
+
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = 'Folder Size Analyzer'
+        $form.Size = New-Object System.Drawing.Size(1120, 700)
+        $form.StartPosition = 'CenterScreen'
+
+        $script:GuiLbl = New-Object System.Windows.Forms.Label
+        $script:GuiLbl.Location = New-Object System.Drawing.Point(12, 12)
+        $script:GuiLbl.Size = New-Object System.Drawing.Size(1080, 40)
+        $script:GuiLbl.Anchor = 'Top,Left,Right'
+        $script:GuiLbl.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
+
+        $script:GuiGrid = New-Object System.Windows.Forms.DataGridView
+        $script:GuiGrid.Location = New-Object System.Drawing.Point(12, 58)
+        $script:GuiGrid.Size = New-Object System.Drawing.Size(1080, 552)
+        $script:GuiGrid.Anchor = 'Top,Bottom,Left,Right'
+        $script:GuiGrid.ReadOnly = $true
+        $script:GuiGrid.AllowUserToAddRows = $false
+        $script:GuiGrid.AllowUserToDeleteRows = $false
+        $script:GuiGrid.RowHeadersVisible = $false
+        $script:GuiGrid.MultiSelect = $false
+        $script:GuiGrid.SelectionMode = 'FullRowSelect'
+        $script:GuiGrid.AutoSizeColumnsMode = 'Fill'
+
+        $script:GuiBtnUp = New-Object System.Windows.Forms.Button
+        $script:GuiBtnUp.Text = 'Subir'
+        $script:GuiBtnUp.Size = New-Object System.Drawing.Size(110, 30)
+        $script:GuiBtnUp.Location = New-Object System.Drawing.Point(12, 622)
+        $script:GuiBtnUp.Anchor = 'Bottom,Left'
+
+        $btnCsv = New-Object System.Windows.Forms.Button
+        $btnCsv.Text = 'Exportar CSV'
+        $btnCsv.Size = New-Object System.Drawing.Size(130, 30)
+        $btnCsv.Location = New-Object System.Drawing.Point(130, 622)
+        $btnCsv.Anchor = 'Bottom,Left'
+
+        $btnExit = New-Object System.Windows.Forms.Button
+        $btnExit.Text = 'Sair'
+        $btnExit.Size = New-Object System.Drawing.Size(90, 30)
+        $btnExit.Location = New-Object System.Drawing.Point(268, 622)
+        $btnExit.Anchor = 'Bottom,Left'
+
+        $hint = New-Object System.Windows.Forms.Label
+        $hint.Text = 'Duplo-clique (ou Enter) numa pasta para entrar. Abre ordenada por tamanho.'
+        $hint.AutoSize = $true
+        $hint.ForeColor = [System.Drawing.Color]::Gray
+        $hint.Location = New-Object System.Drawing.Point(380, 629)
+        $hint.Anchor = 'Bottom,Left'
+
+        $form.Controls.AddRange(@($script:GuiLbl, $script:GuiGrid, $script:GuiBtnUp, $btnCsv, $btnExit, $hint))
+
+        $script:GuiGrid.Add_CellDoubleClick({ param($s, $e) Enter-GuiRow $e.RowIndex })
+        $script:GuiGrid.Add_KeyDown({
+            param($s, $e)
+            if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter -and $script:GuiGrid.CurrentRow) {
+                Enter-GuiRow $script:GuiGrid.CurrentRow.Index
+                $e.Handled = $true
+            }
+        })
+        $script:GuiBtnUp.Add_Click({
+            if ($script:GuiStack.Count -gt 0) {
+                $script:GuiCurrent = $script:GuiStack.Pop()
+                Update-GuiGrid
+            }
+        })
+        $btnCsv.Add_Click({
+            $sfd = New-Object System.Windows.Forms.SaveFileDialog
+            $sfd.Filter = 'CSV (*.csv)|*.csv'
+            $sfd.FileName = 'FolderSizes.csv'
+            if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+                Export-TreeCsv -node $script:GuiCurrent -CsvPath $sfd.FileName
+                [System.Windows.Forms.MessageBox]::Show("Exportado para:`n$($sfd.FileName)", 'CSV') | Out-Null
+            }
+        })
+        $btnExit.Add_Click({ $form.Close() })
+
+        Update-GuiGrid
+        [void]$form.ShowDialog()
     }
     catch {
-        Write-Warning "Nao foi possivel carregar a interface grafica (WinForms). Usa -Interactive (modo consola)."
+        Write-Warning "Interface grafica indisponivel ($($_.Exception.Message)). A usar o modo consola."
         Start-Interactive -root $root -top $Top
-        return
     }
-
-    # Estado de navegacao (script-scope para os event handlers verem as alteracoes)
-    $script:GuiCurrent = $root
-    $script:GuiStack   = New-Object System.Collections.Generic.Stack[object]
-    $script:GuiNodes   = @()
-
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = 'Folder Size Analyzer'
-    $form.Size = New-Object System.Drawing.Size(1120, 700)
-    $form.StartPosition = 'CenterScreen'
-
-    $lbl = New-Object System.Windows.Forms.Label
-    $lbl.Location = New-Object System.Drawing.Point(12, 12)
-    $lbl.Size = New-Object System.Drawing.Size(1080, 40)
-    $lbl.Anchor = 'Top,Left,Right'
-    $lbl.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
-
-    $grid = New-Object System.Windows.Forms.DataGridView
-    $grid.Location = New-Object System.Drawing.Point(12, 58)
-    $grid.Size = New-Object System.Drawing.Size(1080, 552)
-    $grid.Anchor = 'Top,Bottom,Left,Right'
-    $grid.ReadOnly = $true
-    $grid.AllowUserToAddRows = $false
-    $grid.AllowUserToDeleteRows = $false
-    $grid.RowHeadersVisible = $false
-    $grid.MultiSelect = $false
-    $grid.SelectionMode = 'FullRowSelect'
-    $grid.AutoSizeColumnsMode = 'Fill'
-
-    $btnUp = New-Object System.Windows.Forms.Button
-    $btnUp.Text = 'Subir'
-    $btnUp.Size = New-Object System.Drawing.Size(110, 30)
-    $btnUp.Location = New-Object System.Drawing.Point(12, 622)
-    $btnUp.Anchor = 'Bottom,Left'
-
-    $btnCsv = New-Object System.Windows.Forms.Button
-    $btnCsv.Text = 'Exportar CSV'
-    $btnCsv.Size = New-Object System.Drawing.Size(130, 30)
-    $btnCsv.Location = New-Object System.Drawing.Point(130, 622)
-    $btnCsv.Anchor = 'Bottom,Left'
-
-    $btnExit = New-Object System.Windows.Forms.Button
-    $btnExit.Text = 'Sair'
-    $btnExit.Size = New-Object System.Drawing.Size(90, 30)
-    $btnExit.Location = New-Object System.Drawing.Point(268, 622)
-    $btnExit.Anchor = 'Bottom,Left'
-
-    $hint = New-Object System.Windows.Forms.Label
-    $hint.Text = 'Duplo-clique numa pasta para entrar.'
-    $hint.AutoSize = $true
-    $hint.ForeColor = [System.Drawing.Color]::Gray
-    $hint.Location = New-Object System.Drawing.Point(380, 629)
-    $hint.Anchor = 'Bottom,Left'
-
-    $form.Controls.AddRange(@($lbl, $grid, $btnUp, $btnCsv, $btnExit, $hint))
-
-    # Reconstroi a tabela a partir do no atual (instantaneo: ja esta tudo em memoria)
-    function Update-Grid {
-        $node = $script:GuiCurrent
-        $script:GuiNodes = @($node.Children | Sort-Object Size -Descending)
-
-        $dt = New-Object System.Data.DataTable
-        [void]$dt.Columns.Add('Nome', [string])
-        [void]$dt.Columns.Add('Tamanho', [string])
-        [void]$dt.Columns.Add('%', [double])
-        [void]$dt.Columns.Add('Ficheiros', [int])
-        [void]$dt.Columns.Add('Subpastas', [int])
-        [void]$dt.Columns.Add('Tipos', [string])
-        [void]$dt.Columns.Add('Idx', [int])
-
-        $i = 0
-        foreach ($c in $script:GuiNodes) {
-            $pct = 0.0
-            if ($node.Size -gt 0) { $pct = [math]::Round(($c.Size / $node.Size) * 100, 1) }
-            $tipos = ''
-            if ($c.Ext.Count -gt 0) {
-                $tp = $c.Ext.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 3 |
-                      ForEach-Object { $_.Key }
-                $tipos = ($tp -join ', ')
-            }
-            [void]$dt.Rows.Add($c.Name, (Format-Size $c.Size), $pct, $c.FileCount, $c.DirCount, $tipos, $i)
-            $i++
-        }
-
-        $grid.DataSource = $dt
-        if ($grid.Columns['Idx']) { $grid.Columns['Idx'].Visible = $false }
-        if ($grid.Columns['Nome']) { $grid.Columns['Nome'].FillWeight = 240 }
-        if ($grid.Columns['Tipos']) { $grid.Columns['Tipos'].FillWeight = 180 }
-
-        $lbl.Text = ('{0}    —    Total: {1}  |  {2} ficheiros  |  {3} subpastas' -f `
-            $node.Path, (Format-Size $node.Size), $node.FileCount, $node.DirCount)
-        $btnUp.Enabled = ($script:GuiStack.Count -gt 0)
-    }
-
-    $enter = {
-        param($s, $e)
-        if ($e.RowIndex -lt 0) { return }
-        $idx = [int]$grid.Rows[$e.RowIndex].Cells['Idx'].Value
-        $target = $script:GuiNodes[$idx]
-        if ($target.Children.Count -gt 0) {
-            $script:GuiStack.Push($script:GuiCurrent)
-            $script:GuiCurrent = $target
-            Update-Grid
-        }
-    }
-    $grid.Add_CellDoubleClick($enter)
-    # Enter tambem entra na pasta selecionada
-    $grid.Add_KeyDown({
-        param($s, $e)
-        if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter -and $grid.CurrentRow) {
-            $idx = [int]$grid.CurrentRow.Cells['Idx'].Value
-            $target = $script:GuiNodes[$idx]
-            if ($target.Children.Count -gt 0) {
-                $script:GuiStack.Push($script:GuiCurrent)
-                $script:GuiCurrent = $target
-                Update-Grid
-            }
-            $e.Handled = $true
-        }
-    })
-
-    $btnUp.Add_Click({
-        if ($script:GuiStack.Count -gt 0) {
-            $script:GuiCurrent = $script:GuiStack.Pop()
-            Update-Grid
-        }
-    })
-
-    $btnCsv.Add_Click({
-        $sfd = New-Object System.Windows.Forms.SaveFileDialog
-        $sfd.Filter = 'CSV (*.csv)|*.csv'
-        $sfd.FileName = 'FolderSizes.csv'
-        if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-            $rows = New-Object System.Collections.Generic.List[object]
-            function FlattenGui($n) {
-                $rows.Add([pscustomobject]@{
-                    Path = $n.Path; SizeBytes = $n.Size; Size = (Format-Size $n.Size)
-                    Files = $n.FileCount; SubDirs = $n.DirCount })
-                foreach ($c in $n.Children) { FlattenGui $c }
-            }
-            FlattenGui $script:GuiCurrent
-            $rows | Sort-Object SizeBytes -Descending |
-                Export-Csv -LiteralPath $sfd.FileName -NoTypeInformation -Encoding UTF8
-            [System.Windows.Forms.MessageBox]::Show("Exportado para:`n$($sfd.FileName)", 'CSV') | Out-Null
-        }
-    })
-
-    $btnExit.Add_Click({ $form.Close() })
-
-    Update-Grid
-    [void]$form.ShowDialog()
 }
 
 # ----------------------------------------------------------------------------
@@ -485,15 +488,7 @@ Write-Host '=========================================' -ForegroundColor Green
 
 # Export CSV opcional (uma linha por pasta, achatando a arvore)
 if ($CsvOut) {
-    $rows = New-Object System.Collections.Generic.List[object]
-    function Flatten($n) {
-        $rows.Add([pscustomobject]@{
-            Path = $n.Path; SizeBytes = $n.Size; Size = (Format-Size $n.Size)
-            Files = $n.FileCount; SubDirs = $n.DirCount })
-        foreach ($c in $n.Children) { Flatten $c }
-    }
-    Flatten $root
-    $rows | Sort-Object SizeBytes -Descending | Export-Csv -LiteralPath $CsvOut -NoTypeInformation -Encoding UTF8
+    Export-TreeCsv -node $root -CsvPath $CsvOut
     Write-Host "CSV exportado: $CsvOut" -ForegroundColor Green
 }
 
