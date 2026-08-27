@@ -248,5 +248,17 @@ Everything is in `dirsize.ps1`, organized top-to-bottom as:
 
 ## Repo contents
 
-`dirsize.ps1` (the script), `Pastas.cmd` (double-click launcher), `golden.ps1` (regression
-harness, dev-only — not needed to run the tool), `README.md`, `LICENSE`.
+`dirsize.ps1` (the frozen scanner), `Pastas.cmd` (double-click launcher), `golden.ps1`
+(scanner regression harness, dev-only), `diagnose.ps1` + `diagnose.tests.ps1` (Phase 2:
+turns a baseline CSV into deterministic rankings — a *downstream consumer*, not a scanner
+feature, so it is out of scope for the v2.1 freeze and has its own test suite), `README.md`,
+`LICENSE`.
+
+`diagnose.ps1` design rule: **it surfaces what needs a human decision; it never decides.**
+Ownership, taxonomy and "this can be deleted" are governance judgements and stay with people.
+All rules are fixed and visible at the top of the file (`$script:CategoriasPista`,
+`$script:PadraoNomePista`, thresholds are parameters). Cleanup hits are always labelled
+INVESTIGAR. Reproducibility is a contract: same CSV + same params → byte-identical reports,
+and `_PARAMETROS.txt` records the input SHA-256 + every threshold. `diagnose.tests.ps1` runs
+29 asserts against a fixed synthetic CSV and has a `-Mutate` mode that breaks each fixed rule
+and confirms the suite fails.

@@ -83,6 +83,32 @@ copiar caminho / exportar sub-árvore.
 - O 1.º scan de um share grande demora (percorre tudo uma vez); depois a navegação é instantânea.
 - Estado por utilizador em `%APPDATA%\dirsize` (histórico, tamanho da janela).
 
+## `diagnose.ps1` — da medição para a decisão
+
+Consome a baseline (`dirsize.ps1 -CsvOut`) e produz rankings **deterministas** que
+orientam uma reorganização do share. Mesmo CSV + mesmos parâmetros → ficheiros
+byte-idênticos; `_PARAMETROS.txt` regista o SHA-256 do CSV, a data e todos os limiares.
+
+```powershell
+.\dirsize.ps1  -Path '\\servidor\share' -CsvOut baseline\hoje.csv
+.\diagnose.ps1 -CsvIn baseline\hoje.csv
+```
+
+Gera em `<pasta do csv>\diagnostico\`:
+
+| Ficheiro | O quê |
+|---|---|
+| `01-espaco-top.csv` | maiores pastas por tamanho absoluto |
+| `01b-areas-pareto.csv` | áreas de 1.º nível, % cumulativa do total, marca 80/95 |
+| `02-grande-e-antigo.csv` | pastas cujo ficheiro mais recente da subárvore é antigo → candidatas a arquivo |
+| `03-complexidade.csv` | profundas / largas / caminho longo → caras de migrar |
+| `04-pistas-limpeza.csv` | categoria ou nome batem num padrão fixo → **INVESTIGAR**, nunca eliminar |
+| `05-cobertura-parcial.csv` | `Complete=False` → números são mínimos, resolver acesso primeiro |
+| `06-manifest-esqueleto.csv` | uma linha por área, colunas de decisão vazias para o humano preencher |
+
+A ferramenta **faz aparecer o que precisa de decisão**; não decide. Ownership, taxonomia
+e "isto pode ser eliminado" são juízos de governação, ficam a cargo de pessoas.
+
 ## Licença
 
 MIT — ver [LICENSE](LICENSE).
