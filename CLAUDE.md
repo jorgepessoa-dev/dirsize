@@ -47,6 +47,21 @@ directly under Windows PowerShell 5.1:
 powershell -ExecutionPolicy Bypass -File .\dirsize.ps1 -Path .
 ```
 
+**Regression harness.** Behaviour is pinned by a golden-output check (built for the v2.1
+refactor). It builds a fixed tree (denied folder, junction, >260 path, mixed file types with
+frozen mtimes), runs report + all exporters + a snapshot diff, normalises volatile fields
+(durations, timestamps, output paths) and compares SHA-256 per artifact:
+
+```powershell
+.\golden.ps1 -Mode capture   # once, against known-good code -> MANIFEST.csv
+.\golden.ps1 -Mode verify    # after changes -> must print "SAIDA IDENTICA"
+```
+
+It covers scan, console, CSV, JSON, HTML and compare. It does **not** cover the GUI (WinForms
+clicks aren't scriptable) — after GUI changes, launch `-Gui` manually and confirm the window
+opens, stderr is empty, and `%APPDATA%\dirsize\settings.json` is written on close (that last
+one proves the `FormClosing` closure survived).
+
 Syntax-check without running:
 
 ```powershell
@@ -142,6 +157,21 @@ Everything is in `dirsize.ps1`, organized top-to-bottom as:
 - `$script:LongPaths` records **both** files and dirs > 260 chars, each with a `Type`
   (`Ficheiro`/`Pasta`). `MaxMtime` on a node is the newest file mtime in its subtree — surfaced
   as "Fich. + recente" / CSV `NewestFileLocal`+`NewestFileUtc`, never plain "Modified".
+- Script-scope state lives in three `[pscustomobject]` holders declared together near the top:
+  `$script:Scan` (ErrCount, Errors, DeniedDirs, DeniedItems, LongPaths, Count, LastReport,
+  SkipReparse, CancelRequested, Partial), `$script:Prog` (progress window: Form, LblPath,
+  LblStats, Sw, Closing), `$script:Ui` (nav window: Root, Current, Stack, Nodes, Flat, FlatN,
+  Grid, Lbl, BtnUp, FilterBox). Declare any new field in the holder — assigning an undeclared
+  property on a PSCustomObject throws, which is deliberate (catches typos). **Never name a
+  holder after a script parameter**: it was `$script:Gui` and silently clobbered the `-Gui`
+  switch, hence `Ui` (same trap as `$Version` → `$script:AppVersion`).
+- `Show-Gui` delegates construction to `New-GuiForm`, `Initialize-GuiPanel`, `New-GuiButtons`
+  and `New-GuiContextMenu`, but **keeps the event handlers inline**: they close over locals
+  (`$form`, `$btnFlat`, …), so moving a handler into another function breaks its closure.
+  Controls the handlers reach via `$script:Ui` can live anywhere; controls they close over
+  cannot. `New-GuiButtons` returns them for exactly this reason.
+- Lower-bound size formatting goes through `Format-SizeQualified -Style Console|Gui|Html`
+  (`>=`, `≥ `, `&ge; `). Don't hand-roll the prefix again.
 - Every node has `Complete` (bool). It is set `$false` on `enum-dir`/`enum-iter`/`attr`/`size`
   failure and on cancel, and **propagates to ancestors** (`if (-not $child.Complete) { $node.Complete = $false }`).
   `$false` means Size/FileCount/… are lower bounds. Surfaced as CSV column `Complete`, snapshot
@@ -151,5 +181,5 @@ Everything is in `dirsize.ps1`, organized top-to-bottom as:
 
 ## Repo contents
 
-`dirsize.ps1` (the script), `Pastas.cmd` (double-click launcher),
-`README.md`, `LICENSE`. Nothing else — the old `tools/` review helpers were removed.
+`dirsize.ps1` (the script), `Pastas.cmd` (double-click launcher), `golden.ps1` (regression
+harness, dev-only — not needed to run the tool), `README.md`, `LICENSE`.

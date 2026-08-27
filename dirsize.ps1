@@ -108,10 +108,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:AppVersion = '2.0'
+$script:AppVersion = '2.1'
 
 if ($Version) { Write-Host "dirsize v$($script:AppVersion)"; exit 0 }
 
+#region Definicoes da aplicacao (%APPDATA%)
 # ----------------------------------------------------------------------------
 # Definicoes / estado da app (historico de caminhos, tamanho da janela),
 # guardados em %APPDATA%\dirsize. Tudo tolera falha (devolve default).
@@ -174,6 +175,9 @@ function Save-AppSettings {
 }
 
 # ----------------------------------------------------------------------------
+#endregion
+
+#region Helpers - caminhos, formatacao, categorias
 # Helpers
 # ----------------------------------------------------------------------------
 
@@ -242,6 +246,20 @@ function Format-Size {
     if ($b -ge 1MB) { return ('{0:N2} MB' -f ($b / 1MB)) }
     if ($b -ge 1KB) { return ('{0:N2} KB' -f ($b / 1KB)) }
     return ("$b B")
+}
+
+# Tamanho de um no, com marcador de LIMITE INFERIOR quando a subarvore nao foi
+# lida por completo (Complete = $false). Estilo por destino, porque cada um tem
+# a sua convencao: consola '>=', GUI '>= ' (sinal Unicode), HTML '&ge; '.
+function Format-SizeQualified {
+    param($node, [ValidateSet('Console','Gui','Html')] [string] $Style = 'Console')
+    $sz = Format-Size $node.Size
+    if ($node.Complete) { return $sz }
+    switch ($Style) {
+        'Gui'  { return ([char]0x2265 + ' ' + $sz) }
+        'Html' { return ('&ge; ' + $sz) }
+        default { return ('>=' + $sz) }
+    }
 }
 
 function Test-Excluded {
@@ -326,38 +344,70 @@ function Get-ParetoInfo {
     return [pscustomobject]@{ Count = $n; Share = [math]::Round(($acc / $total) * 100, 1) }
 }
 
+#endregion
+
+#region Estado global
 # Estado global do scan
-$script:ErrCount        = 0
-$script:Errors          = New-Object System.Collections.Generic.List[string]
-$script:DeniedDirs      = New-Object System.Collections.Generic.List[string]   # pastas que nao se conseguiu enumerar
-$script:DeniedItems     = New-Object System.Collections.Generic.List[string]   # ficheiros/entradas sem acesso a metadados
-$script:LongPaths       = New-Object System.Collections.Generic.List[object]
-$script:Count           = 0
-$script:LastReport      = 0
-$script:SkipReparse     = 0   # junctions/symlinks ignorados (nao inclui placeholders da cloud)
-$script:CancelRequested = $false
-$script:Partial         = $false
-$script:ProgForm        = $null
-$script:ProgClosing     = $false
-$script:ProgSw          = $null
+$script:Scan = [pscustomobject]@{
+    ErrCount        = 0
+    Errors          = (New-Object System.Collections.Generic.List[string])
+    DeniedDirs      = (New-Object System.Collections.Generic.List[string])  # pastas que nao se conseguiu enumerar
+    DeniedItems     = (New-Object System.Collections.Generic.List[string])  # ficheiros/entradas sem acesso a metadados
+    LongPaths       = (New-Object System.Collections.Generic.List[object])
+    Count           = 0
+    LastReport      = 0
+    SkipReparse     = 0        # junctions/symlinks ignorados (nao inclui placeholders da cloud)
+    CancelRequested = $false
+    Partial         = $false
+}
+
+# Janela de progresso (WinForms). Separada do estado do scan porque e opcional:
+# fica toda a $null quando se corre com -NoProgressGui ou sem subsistema grafico.
+$script:Prog = [pscustomobject]@{
+    Form     = $null
+    LblPath  = $null
+    LblStats = $null
+    Sw       = $null
+    Closing  = $false
+}
+
+# Estado da janela de navegacao. Vive em $script: (e nao em variaveis locais de
+# Show-Gui) porque os event handlers do WinForms correm fora do scope da funcao.
+# Root/Current/Stack/Nodes = navegacao; Flat/FlatN = vista "Top global";
+# Grid/Lbl/BtnUp/FilterBox = controlos que os handlers precisam de alcancar.
+$script:Ui = [pscustomobject]@{
+    Root      = $null
+    Current   = $null
+    Stack     = $null
+    Nodes     = @()
+    Flat      = $false
+    FlatN     = 50
+    Grid      = $null
+    Lbl       = $null
+    BtnUp     = $null
+    FilterBox = $null
+}
 
 # Regista um erro de scan. tag 'enum*' = ao nivel da pasta; 'attr'/'size' = entrada.
 # So os erros de acesso vao para as listas Denied (cobertura); os restantes ficam
-# apenas em $script:Errors (indisponibilidade transitoria, I/O, etc.).
+# apenas em $script:Scan.Errors (indisponibilidade transitoria, I/O, etc.).
 function Add-ScanError {
     param([string] $tag, [string] $path, $err)
-    $script:ErrCount++
-    $script:Errors.Add("[$tag] $path :: $($err.Exception.Message)")
+    $script:Scan.ErrCount++
+    $script:Scan.Errors.Add("[$tag] $path :: $($err.Exception.Message)")
     $ex = $err.Exception
     $denied = ($ex -is [System.UnauthorizedAccessException] -or
                $ex.InnerException -is [System.UnauthorizedAccessException] -or
                $ex.Message -match 'negad|denied|Acesso|Access is denied')
     if (-not $denied) { return }
-    if ($tag -like 'enum*') { $script:DeniedDirs.Add($path) }
-    else                    { $script:DeniedItems.Add($path) }
+    if ($tag -like 'enum*') { $script:Scan.DeniedDirs.Add($path) }
+    else                    { $script:Scan.DeniedItems.Add($path) }
 }
 
 # ----------------------------------------------------------------------------
+#endregion
+
+#region Scan
 # Scan recursivo -> devolve um no com tamanho/contagens CUMULATIVOS
 #   Node = { Path; Name; Size; FileCount; DirCount; Children[]; Ext{ext->size}; MaxMtime; Complete }
 # ----------------------------------------------------------------------------
@@ -379,7 +429,7 @@ function Get-FolderNode {
     }
     if ([string]::IsNullOrEmpty($node.Name)) { $node.Name = $DisplayPath }
 
-    if ($script:CancelRequested) { $node.Complete = $false; return $node }
+    if ($script:Scan.CancelRequested) { $node.Complete = $false; return $node }
 
     $extPath = ConvertTo-ExtendedPath $DisplayPath
     try {
@@ -398,18 +448,18 @@ function Get-FolderNode {
     # perde o resto DESTA pasta -- o scan global continua.
     try {
       foreach ($entry in $enum) {
-        if ($script:CancelRequested) { break }
+        if ($script:Scan.CancelRequested) { break }
 
         $leaf = [System.IO.Path]::GetFileName($entry)
         $childDisplay = $DisplayPath.TrimEnd('\') + '\' + $leaf
 
-        $script:Count++
-        if (($script:Count - $script:LastReport) -ge 400) {
-            $script:LastReport = $script:Count
-            if ($script:ProgForm) { Update-ProgressWindow $childDisplay }
+        $script:Scan.Count++
+        if (($script:Scan.Count - $script:Scan.LastReport) -ge 400) {
+            $script:Scan.LastReport = $script:Scan.Count
+            if ($script:Prog.Form) { Update-ProgressWindow $childDisplay }
             else {
                 Write-Progress -Activity 'A analisar...' `
-                    -Status "$($script:Count) itens | erros: $($script:ErrCount) | $childDisplay"
+                    -Status "$($script:Scan.Count) itens | erros: $($script:Scan.ErrCount) | $childDisplay"
             }
         }
 
@@ -421,7 +471,7 @@ function Get-FolderNode {
             # contagem). Placeholders da cloud (OneDrive etc.) tambem sao reparse
             # points, mas tem de ser percorridos como ficheiros/pastas normais.
             if (($attr -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-                if (Test-IsJunctionOrSymlink $entry) { $script:SkipReparse++; continue }
+                if (Test-IsJunctionOrSymlink $entry) { $script:Scan.SkipReparse++; continue }
             }
         }
         catch {
@@ -444,7 +494,7 @@ function Get-FolderNode {
                 else { $node.Ext[$k] = $child.Ext[$k] }
             }
             if ($childDisplay.Length -gt 260) {
-                $script:LongPaths.Add([pscustomobject]@{
+                $script:Scan.LongPaths.Add([pscustomobject]@{
                     Length = $childDisplay.Length; Size = $child.Size; Path = $childDisplay; Type = 'Pasta' })
             }
         }
@@ -468,7 +518,7 @@ function Get-FolderNode {
             if ($node.Ext.ContainsKey($ext)) { $node.Ext[$ext] += $len } else { $node.Ext[$ext] = $len }
 
             if ($childDisplay.Length -gt 260) {
-                $script:LongPaths.Add([pscustomobject]@{
+                $script:Scan.LongPaths.Add([pscustomobject]@{
                     Length = $childDisplay.Length; Size = $len; Path = $childDisplay; Type = 'Ficheiro' })
             }
         }
@@ -512,6 +562,9 @@ function Get-FlatTop {
 }
 
 # ----------------------------------------------------------------------------
+#endregion
+
+#region Vistas de consola
 # Impressao
 # ----------------------------------------------------------------------------
 function Show-Ext {
@@ -534,9 +587,8 @@ function Show-Children {
         if ($node.Size -gt 0) { $pct = ($c.Size / $node.Size) * 100 }
         $bar = ('#' * [int][math]::Round($pct / 5)).PadRight(20)
         $tag = if ($Numbered) { ('[{0,2}] ' -f $i) } else { '' }
-        $szc = $(if ($c.Complete) { '' } else { '>=' }) + (Format-Size $c.Size)
         Write-Host ('{0}{1}{2,12}  {3,6:N1}%  |{4}|  {5}  ({6} fich., mod. {7})' -f `
-            $pad, $tag, $szc, $pct, $bar, $c.Name, $c.FileCount, (Format-Date $c.MaxMtime))
+            $pad, $tag, (Format-SizeQualified $c), $pct, $bar, $c.Name, $c.FileCount, (Format-Date $c.MaxMtime))
         Show-Ext -node $c -pad ($indent * 2)
     }
     $rest = $sorted.Count - $shown.Count
@@ -578,9 +630,8 @@ function Show-FlatTop {
         if ($root.Size -gt 0) { $pct = ($x.Size / $root.Size) * 100 }
         $cat = ''
         if ($x.Ext.Count -gt 0) { $cat = (Get-CategoryText -node $x -top 1) }
-        $szx = $(if ($x.Complete) { '' } else { '>=' }) + (Format-Size $x.Size)
         Write-Host ('{0,3}. {1,12}  {2,5:N1}%  fich+rec.{3}  {4,-16}  {5}' -f `
-            $rank, $szx, $pct, (Format-Date $x.MaxMtime), $cat, $x.Path)
+            $rank, (Format-SizeQualified $x), $pct, (Format-Date $x.MaxMtime), $cat, $x.Path)
     }
 }
 
@@ -627,6 +678,9 @@ function Start-Interactive {
     }
 }
 
+#endregion
+
+#region Exportadores (CSV / JSON / HTML / comparacao)
 # Achata a arvore numa lista de pastas (iterativo, sem recursao).
 # Depth = nivel relativo a raiz (raiz = 0). NewestFile* = data do ficheiro mais
 # recente da subarvore (NAO e "a pasta foi mexida agora").
@@ -680,7 +734,7 @@ function Export-Snapshot {
             totalBytes = [int64]$root.Size
             files      = $root.FileCount
             subDirs    = $root.DirCount
-            partial    = [bool]$script:Partial
+            partial    = [bool]$script:Scan.Partial
         }
         folders = @($folders)
     }
@@ -796,13 +850,13 @@ function Export-HtmlReport {
     & $add "<h1>Relatorio de ocupacao de espaco</h1>"
     & $add ("<div class='muted'>" + (ConvertTo-HtmlText $root.Path) + " &mdash; " +
             (Get-Date).ToString('yyyy-MM-dd HH:mm') + " &mdash; v$($script:AppVersion)" +
-            $(if ($script:Partial) { " &mdash; <b>SCAN PARCIAL (cancelado)</b>" } else { "" }) + "</div>")
+            $(if ($script:Scan.Partial) { " &mdash; <b>SCAN PARCIAL (cancelado)</b>" } else { "" }) + "</div>")
 
     & $add "<div class='cards'>"
-    & $add ("<div class='card'><div class='v'>" + $(if (-not $root.Complete) { '&ge; ' }) + (Format-Size $root.Size) + "</div><div class='l'>Total</div></div>")
+    & $add ("<div class='card'><div class='v'>" + (Format-SizeQualified $root -Style Html) + "</div><div class='l'>Total</div></div>")
     & $add ("<div class='card'><div class='v'>" + ('{0:N0}' -f $root.FileCount) + "</div><div class='l'>Ficheiros</div></div>")
     & $add ("<div class='card'><div class='v'>" + ('{0:N0}' -f $root.DirCount) + "</div><div class='l'>Subpastas</div></div>")
-    & $add ("<div class='card'><div class='v'>" + (@($script:DeniedDirs | Select-Object -Unique).Count) + "</div><div class='l'>Pastas s/ acesso</div></div>")
+    & $add ("<div class='card'><div class='v'>" + (@($script:Scan.DeniedDirs | Select-Object -Unique).Count) + "</div><div class='l'>Pastas s/ acesso</div></div>")
     & $add ("<div class='card'><div class='v'>" + ('{0:N1}s' -f $Elapsed) + "</div><div class='l'>Tempo</div></div>")
     & $add "</div>"
 
@@ -828,9 +882,8 @@ function Export-HtmlReport {
         if ($root.Size -gt 0) { $pct = [math]::Round(($x.Size / $root.Size) * 100, 1) }
         $cat = ''
         if ($x.Ext.Count -gt 0) { $cat = Get-CategoryText -node $x -top 2 }
-        $sz = $(if ($x.Complete) { '' } else { '&ge; ' }) + (Format-Size $x.Size)
         & $add ("<tr><td>$rank</td><td class='path'>" + (ConvertTo-HtmlText $x.Path) + "</td>" +
-                "<td class='num'>$sz</td><td class='num'>$pct%</td>" +
+                "<td class='num'>" + (Format-SizeQualified $x -Style Html) + "</td><td class='num'>$pct%</td>" +
                 "<td style='width:110px'><div class='bar'><span style='width:$([math]::Min(100,$pct))%'></span></div></td>" +
                 "<td class='num'>" + ('{0:N0}' -f $x.FileCount) + "</td><td>" + (Format-Date $x.MaxMtime) + "</td>" +
                 "<td>" + (ConvertTo-HtmlText $cat) + "</td></tr>")
@@ -871,8 +924,8 @@ function Export-HtmlReport {
         }
     }
 
-    $ddirs  = @($script:DeniedDirs  | Select-Object -Unique)
-    $ditems = @($script:DeniedItems | Select-Object -Unique)
+    $ddirs  = @($script:Scan.DeniedDirs  | Select-Object -Unique)
+    $ditems = @($script:Scan.DeniedItems | Select-Object -Unique)
     if ($ddirs.Count -gt 0 -or $ditems.Count -gt 0) {
         & $add "<h2>Nao medido (sem acesso) &mdash; $($ddirs.Count) pasta(s), $($ditems.Count) item(ns)</h2>"
         & $add "<p class='muted'>O espaco destas pastas NAO entra nos totais. Pede acesso antes de decidir a reorganizacao.</p>"
@@ -883,10 +936,10 @@ function Export-HtmlReport {
         }
     }
 
-    if ($script:LongPaths.Count -gt 0) {
-        & $add "<h2>Caminhos &gt; 260 caracteres &mdash; $($script:LongPaths.Count)</h2>"
+    if ($script:Scan.LongPaths.Count -gt 0) {
+        & $add "<h2>Caminhos &gt; 260 caracteres &mdash; $($script:Scan.LongPaths.Count)</h2>"
         & $add "<table><tr><th>Tipo</th><th class='num'>Tamanho</th><th class='num'>Chars</th><th>Caminho</th></tr>"
-        foreach ($l in ($script:LongPaths | Sort-Object Size -Descending | Select-Object -First 50)) {
+        foreach ($l in ($script:Scan.LongPaths | Sort-Object Size -Descending | Select-Object -First 50)) {
             & $add ("<tr><td>" + (ConvertTo-HtmlText ([string]$l.Type)) + "</td><td class='num'>" + (Format-Size $l.Size) +
                     "</td><td class='num'>" + $l.Length + "</td><td class='path'>" + (ConvertTo-HtmlText $l.Path) + "</td></tr>")
         }
@@ -898,6 +951,9 @@ function Export-HtmlReport {
 }
 
 # ----------------------------------------------------------------------------
+#endregion
+
+#region GUI - janela de progresso
 # Janela de progresso durante o scan (modeless + DoEvents). Botao Cancelar.
 # ----------------------------------------------------------------------------
 function Show-ProgressWindow {
@@ -913,15 +969,15 @@ function Show-ProgressWindow {
         $f.MaximizeBox = $false
         $f.MinimizeBox = $false
 
-        $script:ProgLblPath = New-Object System.Windows.Forms.Label
-        $script:ProgLblPath.Location = New-Object System.Drawing.Point(14, 14)
-        $script:ProgLblPath.Size = New-Object System.Drawing.Size(440, 60)
-        $script:ProgLblPath.Text = 'A iniciar...'
+        $script:Prog.LblPath = New-Object System.Windows.Forms.Label
+        $script:Prog.LblPath.Location = New-Object System.Drawing.Point(14, 14)
+        $script:Prog.LblPath.Size = New-Object System.Drawing.Size(440, 60)
+        $script:Prog.LblPath.Text = 'A iniciar...'
 
-        $script:ProgLblStats = New-Object System.Windows.Forms.Label
-        $script:ProgLblStats.Location = New-Object System.Drawing.Point(14, 78)
-        $script:ProgLblStats.Size = New-Object System.Drawing.Size(440, 20)
-        $script:ProgLblStats.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+        $script:Prog.LblStats = New-Object System.Windows.Forms.Label
+        $script:Prog.LblStats.Location = New-Object System.Drawing.Point(14, 78)
+        $script:Prog.LblStats.Size = New-Object System.Drawing.Size(440, 20)
+        $script:Prog.LblStats.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
 
         $bar = New-Object System.Windows.Forms.ProgressBar
         $bar.Location = New-Object System.Drawing.Point(14, 104)
@@ -934,49 +990,52 @@ function Show-ProgressWindow {
         $btn.Size = New-Object System.Drawing.Size(100, 30)
         $btn.Location = New-Object System.Drawing.Point(354, 132)
         $btn.Add_Click({
-            $script:CancelRequested = $true
+            $script:Scan.CancelRequested = $true
             $btn.Enabled = $false
             $btn.Text = 'A cancelar...'
         })
 
-        $f.Controls.AddRange(@($script:ProgLblPath, $script:ProgLblStats, $bar, $btn))
-        $f.Add_FormClosing({ if (-not $script:ProgClosing) { $script:CancelRequested = $true } })
+        $f.Controls.AddRange(@($script:Prog.LblPath, $script:Prog.LblStats, $bar, $btn))
+        $f.Add_FormClosing({ if (-not $script:Prog.Closing) { $script:Scan.CancelRequested = $true } })
 
-        $script:ProgClosing = $false
-        $script:ProgForm = $f
-        $script:ProgSw = [System.Diagnostics.Stopwatch]::StartNew()
+        $script:Prog.Closing = $false
+        $script:Prog.Form = $f
+        $script:Prog.Sw = [System.Diagnostics.Stopwatch]::StartNew()
         $f.Show(); $f.Refresh()
         [System.Windows.Forms.Application]::DoEvents()
         return $true
     }
     catch {
-        $script:ProgForm = $null
+        $script:Prog.Form = $null
         return $false
     }
 }
 
 function Update-ProgressWindow {
     param([string] $currentPath)
-    if (-not $script:ProgForm) { return }
+    if (-not $script:Prog.Form) { return }
     try {
         $disp = $currentPath
         if ($disp.Length -gt 78) { $disp = '...' + $disp.Substring($disp.Length - 75) }
-        $script:ProgLblPath.Text = $disp
-        $secs = if ($script:ProgSw) { $script:ProgSw.Elapsed.TotalSeconds } else { 0 }
-        $script:ProgLblStats.Text = ('{0:N0} itens   |   {1} erros   |   {2:N0}s' -f $script:Count, $script:ErrCount, $secs)
+        $script:Prog.LblPath.Text = $disp
+        $secs = if ($script:Prog.Sw) { $script:Prog.Sw.Elapsed.TotalSeconds } else { 0 }
+        $script:Prog.LblStats.Text = ('{0:N0} itens   |   {1} erros   |   {2:N0}s' -f $script:Scan.Count, $script:Scan.ErrCount, $secs)
         [System.Windows.Forms.Application]::DoEvents()
     }
     catch { }
 }
 
 function Close-ProgressWindow {
-    if (-not $script:ProgForm) { return }
-    $script:ProgClosing = $true
-    try { $script:ProgForm.Close(); $script:ProgForm.Dispose() } catch { }
-    $script:ProgForm = $null
+    if (-not $script:Prog.Form) { return }
+    $script:Prog.Closing = $true
+    try { $script:Prog.Form.Close(); $script:Prog.Form.Dispose() } catch { }
+    $script:Prog.Form = $null
 }
 
 # ----------------------------------------------------------------------------
+#endregion
+
+#region GUI - helpers e grelha
 # Janela de navegacao: helpers de acao + reconstrucao da grelha.
 # Funcoes de TOPO + estado em $script: -> chamaveis dos event handlers WinForms.
 # ----------------------------------------------------------------------------
@@ -993,21 +1052,21 @@ function Copy-PathToClipboard {
 }
 
 function Get-GuiSelectedNode {
-    if (-not $script:GuiGrid.CurrentRow) { return $null }
-    try { return $script:GuiNodes[[int]$script:GuiGrid.CurrentRow.Cells['Idx'].Value] } catch { return $null }
+    if (-not $script:Ui.Grid.CurrentRow) { return $null }
+    try { return $script:Ui.Nodes[[int]$script:Ui.Grid.CurrentRow.Cells['Idx'].Value] } catch { return $null }
 }
 
 function Update-GuiGrid {
-    $node = $script:GuiCurrent
+    $node = $script:Ui.Current
 
-    if ($script:GuiFlat) {
-        $script:GuiNodes = Get-FlatTop -root $script:GuiRoot -n $script:GuiFlatN
+    if ($script:Ui.Flat) {
+        $script:Ui.Nodes = Get-FlatTop -root $script:Ui.Root -n $script:Ui.FlatN
     } else {
-        $script:GuiNodes = @($node.Children | Sort-Object Size -Descending)
+        $script:Ui.Nodes = @($node.Children | Sort-Object Size -Descending)
     }
 
     $dt = New-Object System.Data.DataTable
-    [void]$dt.Columns.Add($(if ($script:GuiFlat) { 'Caminho' } else { 'Nome' }), [string])
+    [void]$dt.Columns.Add($(if ($script:Ui.Flat) { 'Caminho' } else { 'Nome' }), [string])
     [void]$dt.Columns.Add('Tamanho', [string])
     [void]$dt.Columns.Add('Bytes', [int64])
     [void]$dt.Columns.Add('%', [double])
@@ -1017,45 +1076,44 @@ function Update-GuiGrid {
     [void]$dt.Columns.Add('Conteudo', [string])
     [void]$dt.Columns.Add('Idx', [int])
 
-    $refTotal = if ($script:GuiFlat) { $script:GuiRoot.Size } else { $node.Size }
+    $refTotal = if ($script:Ui.Flat) { $script:Ui.Root.Size } else { $node.Size }
     $i = 0
-    foreach ($c in $script:GuiNodes) {
+    foreach ($c in $script:Ui.Nodes) {
         $pct = 0.0
         if ($refTotal -gt 0) { $pct = [math]::Round(($c.Size / $refTotal) * 100, 1) }
         $conteudo = ''
         if ($c.Ext.Count -gt 0) { $conteudo = Get-CategoryText -node $c -top 3 }
-        $label = if ($script:GuiFlat) { $c.Path } else { $c.Name }
-        $szg = $(if ($c.Complete) { '' } else { [char]0x2265 + ' ' }) + (Format-Size $c.Size)
-        [void]$dt.Rows.Add($label, $szg, [int64]$c.Size, $pct, $c.FileCount, $c.DirCount, (Format-Date $c.MaxMtime), $conteudo, $i)
+        $label = if ($script:Ui.Flat) { $c.Path } else { $c.Name }
+        [void]$dt.Rows.Add($label, (Format-SizeQualified $c -Style Gui), [int64]$c.Size, $pct, $c.FileCount, $c.DirCount, (Format-Date $c.MaxMtime), $conteudo, $i)
         $i++
     }
 
-    $script:GuiGrid.DataSource = $dt
-    if ($script:GuiGrid.Columns['Idx'])      { $script:GuiGrid.Columns['Idx'].Visible = $false }
-    if ($script:GuiGrid.Columns['Bytes'])    { $script:GuiGrid.Columns['Bytes'].Visible = $false }
-    if ($script:GuiGrid.Columns['Nome'])     { $script:GuiGrid.Columns['Nome'].FillWeight = 220 }
-    if ($script:GuiGrid.Columns['Caminho'])  { $script:GuiGrid.Columns['Caminho'].FillWeight = 420 }
-    if ($script:GuiGrid.Columns['Conteudo']) { $script:GuiGrid.Columns['Conteudo'].FillWeight = 240 }
+    $script:Ui.Grid.DataSource = $dt
+    if ($script:Ui.Grid.Columns['Idx'])      { $script:Ui.Grid.Columns['Idx'].Visible = $false }
+    if ($script:Ui.Grid.Columns['Bytes'])    { $script:Ui.Grid.Columns['Bytes'].Visible = $false }
+    if ($script:Ui.Grid.Columns['Nome'])     { $script:Ui.Grid.Columns['Nome'].FillWeight = 220 }
+    if ($script:Ui.Grid.Columns['Caminho'])  { $script:Ui.Grid.Columns['Caminho'].FillWeight = 420 }
+    if ($script:Ui.Grid.Columns['Conteudo']) { $script:Ui.Grid.Columns['Conteudo'].FillWeight = 240 }
     # "Tamanho" e texto formatado -> ordenacao gerida a mao (por 'Bytes') no
     # handler ColumnHeaderMouseClick, senao ordenava alfabeticamente.
-    if ($script:GuiGrid.Columns['Tamanho']) {
-        $script:GuiGrid.Columns['Tamanho'].SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::Programmatic
-        $script:GuiGrid.Columns['Tamanho'].HeaderCell.SortGlyphDirection = 'None'
+    if ($script:Ui.Grid.Columns['Tamanho']) {
+        $script:Ui.Grid.Columns['Tamanho'].SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::Programmatic
+        $script:Ui.Grid.Columns['Tamanho'].HeaderCell.SortGlyphDirection = 'None'
     }
     # cada pasta comeca sem filtro
-    if ($script:GuiFilterBox -and $script:GuiFilterBox.Text -ne '') { $script:GuiFilterBox.Text = '' }
+    if ($script:Ui.FilterBox -and $script:Ui.FilterBox.Text -ne '') { $script:Ui.FilterBox.Text = '' }
 
-    if ($script:GuiFlat) {
-        $script:GuiLbl.Text = ('TOP {0} pastas de TODA a arvore    (raiz: {1}  |  {2})' -f `
-            $script:GuiFlatN, $script:GuiRoot.Path, (Format-Size $script:GuiRoot.Size))
-        $script:GuiBtnUp.Enabled = $false
+    if ($script:Ui.Flat) {
+        $script:Ui.Lbl.Text = ('TOP {0} pastas de TODA a arvore    (raiz: {1}  |  {2})' -f `
+            $script:Ui.FlatN, $script:Ui.Root.Path, (Format-Size $script:Ui.Root.Size))
+        $script:Ui.BtnUp.Enabled = $false
     } else {
         $p = Get-ParetoInfo -node $node -fraction 0.8
         $pareto = ''
         if ($node.Children.Count -gt 1) { $pareto = ('   -   Pareto: {0} maiores = {1}% do espaco' -f $p.Count, $p.Share) }
-        $script:GuiLbl.Text = ('{0}    -    Total: {1}  |  {2} fich.  |  {3} subpastas  |  mod. {4}{5}' -f `
+        $script:Ui.Lbl.Text = ('{0}    -    Total: {1}  |  {2} fich.  |  {3} subpastas  |  mod. {4}{5}' -f `
             $node.Path, (Format-Size $node.Size), $node.FileCount, $node.DirCount, (Format-Date $node.MaxMtime), $pareto)
-        $script:GuiBtnUp.Enabled = ($script:GuiStack.Count -gt 0)
+        $script:Ui.BtnUp.Enabled = ($script:Ui.Stack.Count -gt 0)
     }
 }
 
@@ -1063,12 +1121,12 @@ function Update-GuiGrid {
 function Enter-GuiRow {
     param([int] $rowIndex)
     if ($rowIndex -lt 0) { return }
-    $idx = [int]$script:GuiGrid.Rows[$rowIndex].Cells['Idx'].Value
-    $target = $script:GuiNodes[$idx]
-    if ($script:GuiFlat) { Invoke-OpenInExplorer $target.Path; return }
+    $idx = [int]$script:Ui.Grid.Rows[$rowIndex].Cells['Idx'].Value
+    $target = $script:Ui.Nodes[$idx]
+    if ($script:Ui.Flat) { Invoke-OpenInExplorer $target.Path; return }
     if ($target.Children.Count -gt 0) {
-        $script:GuiStack.Push($script:GuiCurrent)
-        $script:GuiCurrent = $target
+        $script:Ui.Stack.Push($script:Ui.Current)
+        $script:Ui.Current = $target
         Update-GuiGrid
     } else {
         Invoke-OpenInExplorer $target.Path
@@ -1150,7 +1208,124 @@ function Select-FolderGui {
 # Janela grafica (WinForms) sobre a arvore JA em memoria -> navegacao instantanea.
 # Nao precisa de admin. Funciona em PowerShell 5.1 e 7+ num ambiente com desktop
 # (consola local ou sessao RDP). Nao funciona em SSH puro sem interface grafica.
+#endregion
+
+#region GUI - janela de navegacao
 # ----------------------------------------------------------------------------
+# Cria a janela e restaura tamanho/posicao guardados. Devolve o Form.
+function New-GuiForm {
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = 'Folder Size Analyzer'
+    $form.Size = New-Object System.Drawing.Size(1120, 700)
+    $form.StartPosition = 'CenterScreen'
+    $form.MinimumSize = New-Object System.Drawing.Size(760, 460)
+
+    $st = Get-AppSettings
+    if ($st) {
+        try {
+            if ([int]$st.winW -ge 700 -and [int]$st.winH -ge 440) {
+                $form.Size = New-Object System.Drawing.Size([int]$st.winW, [int]$st.winH)
+            }
+            if ($null -ne $st.winX -and $null -ne $st.winY) {
+                $form.StartPosition = 'Manual'
+                $form.Location = New-Object System.Drawing.Point([int]$st.winX, [int]$st.winY)
+            }
+        } catch { }
+    }
+    return $form
+}
+
+# Controlos que os event handlers precisam de alcancar -> vao para $script:Ui.
+function Initialize-GuiPanel {
+    $script:Ui.Lbl = New-Object System.Windows.Forms.Label
+    $script:Ui.Lbl.Location = New-Object System.Drawing.Point(12, 12)
+    $script:Ui.Lbl.Size = New-Object System.Drawing.Size(760, 40)
+    $script:Ui.Lbl.Anchor = 'Top,Left,Right'
+    $script:Ui.Lbl.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
+
+    $script:Ui.FilterBox = New-Object System.Windows.Forms.TextBox
+    $script:Ui.FilterBox.Location = New-Object System.Drawing.Point(842, 13)
+    $script:Ui.FilterBox.Size = New-Object System.Drawing.Size(250, 24)
+    $script:Ui.FilterBox.Anchor = 'Top,Right'
+
+    $script:Ui.Grid = New-Object System.Windows.Forms.DataGridView
+    $script:Ui.Grid.Location = New-Object System.Drawing.Point(12, 58)
+    $script:Ui.Grid.Size = New-Object System.Drawing.Size(1080, 552)
+    $script:Ui.Grid.Anchor = 'Top,Bottom,Left,Right'
+    $script:Ui.Grid.ReadOnly = $true
+    $script:Ui.Grid.AllowUserToAddRows = $false
+    $script:Ui.Grid.AllowUserToDeleteRows = $false
+    $script:Ui.Grid.RowHeadersVisible = $false
+    $script:Ui.Grid.MultiSelect = $false
+    $script:Ui.Grid.SelectionMode = 'FullRowSelect'
+    $script:Ui.Grid.AutoSizeColumnsMode = 'Fill'
+
+    $script:Ui.BtnUp = New-Object System.Windows.Forms.Button
+    $script:Ui.BtnUp.Text = 'Subir'
+    $script:Ui.BtnUp.Size = New-Object System.Drawing.Size(90, 30)
+    $script:Ui.BtnUp.Location = New-Object System.Drawing.Point(12, 622)
+    $script:Ui.BtnUp.Anchor = 'Bottom,Left'
+}
+
+# Botoes/etiquetas cujos handlers sao ligados em Show-Gui. Devolvidos (e nao
+# postos em $script:) para que os handlers definidos la fechem sobre LOCAIS --
+# mover a definicao dos handlers para outra funcao partiria esses closures.
+function New-GuiButtons {
+    $mk = {
+        param($text, $w, $x)
+        $b = New-Object System.Windows.Forms.Button
+        $b.Text = $text
+        $b.Size = New-Object System.Drawing.Size($w, 30)
+        $b.Location = New-Object System.Drawing.Point($x, 622)
+        $b.Anchor = 'Bottom,Left'
+        return $b
+    }
+    $lblFil = New-Object System.Windows.Forms.Label
+    $lblFil.Text = 'Filtrar:'
+    $lblFil.Location = New-Object System.Drawing.Point(792, 16)
+    $lblFil.Size = New-Object System.Drawing.Size(48, 20)
+    $lblFil.Anchor = 'Top,Right'
+
+    $hint = New-Object System.Windows.Forms.Label
+    $hint.Text = 'Duplo-clique/Enter = entrar. Backspace = subir. Clique direito = mais opcoes.'
+    $hint.AutoSize = $true
+    $hint.ForeColor = [System.Drawing.Color]::Gray
+    $hint.Location = New-Object System.Drawing.Point(694, 629)
+    $hint.Anchor = 'Bottom,Left'
+
+    return @{
+        Flat   = (& $mk 'Top global'          100 108)
+        Open   = (& $mk 'Abrir no Explorador' 140 214)
+        Copy   = (& $mk 'Copiar caminho'      120 360)
+        Csv    = (& $mk 'Exportar CSV'        110 486)
+        Exit   = (& $mk 'Sair'                 80 602)
+        LblFil = $lblFil
+        Hint   = $hint
+    }
+}
+
+# Menu de contexto da grelha. Os handlers so usam funcoes de topo e
+# Get-GuiSelectedNode -> nao dependem de locais, logo vivem bem aqui.
+function New-GuiContextMenu {
+    $ctx = New-Object System.Windows.Forms.ContextMenuStrip
+    $miOpen = $ctx.Items.Add('Abrir no Explorador')
+    $miCopy = $ctx.Items.Add('Copiar caminho')
+    $miSub  = $ctx.Items.Add('Exportar esta sub-arvore (CSV)...')
+    $miOpen.Add_Click({ $n = Get-GuiSelectedNode; if ($n) { Invoke-OpenInExplorer $n.Path } })
+    $miCopy.Add_Click({ $n = Get-GuiSelectedNode; if ($n) { Copy-PathToClipboard $n.Path } })
+    $miSub.Add_Click({
+        $n = Get-GuiSelectedNode; if (-not $n) { return }
+        $sfd = New-Object System.Windows.Forms.SaveFileDialog
+        $sfd.Filter = 'CSV (*.csv)|*.csv'
+        $sfd.FileName = ($n.Name -replace '[^\w\.-]', '_') + '.csv'
+        if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            Export-TreeCsv -node $n -CsvPath $sfd.FileName
+            [System.Windows.Forms.MessageBox]::Show("Exportado:`n$($sfd.FileName)", 'CSV') | Out-Null
+        }
+    })
+    return $ctx
+}
+
 function Show-Gui {
     param($root)
 
@@ -1160,181 +1335,83 @@ function Show-Gui {
         Add-Type -AssemblyName System.Windows.Forms
         Add-Type -AssemblyName System.Drawing
 
-        $script:GuiRoot    = $root
-        $script:GuiCurrent = $root
-        $script:GuiStack   = New-Object System.Collections.Generic.Stack[object]
-        $script:GuiNodes   = @()
-        $script:GuiFlat    = $false
-        $script:GuiFlatN   = $(if ($FlatTop -gt 0) { $FlatTop } else { 50 })
+        $script:Ui.Root    = $root
+        $script:Ui.Current = $root
+        $script:Ui.Stack   = New-Object System.Collections.Generic.Stack[object]
+        $script:Ui.Nodes   = @()
+        $script:Ui.Flat    = $false
+        $script:Ui.FlatN   = $(if ($FlatTop -gt 0) { $FlatTop } else { 50 })
 
-        $form = New-Object System.Windows.Forms.Form
-        $form.Text = 'Folder Size Analyzer'
-        $form.Size = New-Object System.Drawing.Size(1120, 700)
-        $form.StartPosition = 'CenterScreen'
-        $form.MinimumSize = New-Object System.Drawing.Size(760, 460)
+        $form = New-GuiForm
+        Initialize-GuiPanel
+        $c = New-GuiButtons
+        $btnFlat = $c.Flat; $btnOpen = $c.Open; $btnCopy = $c.Copy
+        $btnCsv  = $c.Csv;  $btnExit = $c.Exit
+        $lblFil  = $c.LblFil; $hint = $c.Hint
 
-        $st = Get-AppSettings
-        if ($st) {
-            try {
-                if ([int]$st.winW -ge 700 -and [int]$st.winH -ge 440) {
-                    $form.Size = New-Object System.Drawing.Size([int]$st.winW, [int]$st.winH)
-                }
-                if ($null -ne $st.winX -and $null -ne $st.winY) {
-                    $form.StartPosition = 'Manual'
-                    $form.Location = New-Object System.Drawing.Point([int]$st.winX, [int]$st.winY)
-                }
-            } catch { }
-        }
-
-        $script:GuiLbl = New-Object System.Windows.Forms.Label
-        $script:GuiLbl.Location = New-Object System.Drawing.Point(12, 12)
-        $script:GuiLbl.Size = New-Object System.Drawing.Size(760, 40)
-        $script:GuiLbl.Anchor = 'Top,Left,Right'
-        $script:GuiLbl.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
-
-        $lblFil = New-Object System.Windows.Forms.Label
-        $lblFil.Text = 'Filtrar:'
-        $lblFil.Location = New-Object System.Drawing.Point(792, 16)
-        $lblFil.Size = New-Object System.Drawing.Size(48, 20)
-        $lblFil.Anchor = 'Top,Right'
-
-        $script:GuiFilterBox = New-Object System.Windows.Forms.TextBox
-        $script:GuiFilterBox.Location = New-Object System.Drawing.Point(842, 13)
-        $script:GuiFilterBox.Size = New-Object System.Drawing.Size(250, 24)
-        $script:GuiFilterBox.Anchor = 'Top,Right'
-
-        $script:GuiGrid = New-Object System.Windows.Forms.DataGridView
-        $script:GuiGrid.Location = New-Object System.Drawing.Point(12, 58)
-        $script:GuiGrid.Size = New-Object System.Drawing.Size(1080, 552)
-        $script:GuiGrid.Anchor = 'Top,Bottom,Left,Right'
-        $script:GuiGrid.ReadOnly = $true
-        $script:GuiGrid.AllowUserToAddRows = $false
-        $script:GuiGrid.AllowUserToDeleteRows = $false
-        $script:GuiGrid.RowHeadersVisible = $false
-        $script:GuiGrid.MultiSelect = $false
-        $script:GuiGrid.SelectionMode = 'FullRowSelect'
-        $script:GuiGrid.AutoSizeColumnsMode = 'Fill'
-
-        $script:GuiBtnUp = New-Object System.Windows.Forms.Button
-        $script:GuiBtnUp.Text = 'Subir'
-        $script:GuiBtnUp.Size = New-Object System.Drawing.Size(90, 30)
-        $script:GuiBtnUp.Location = New-Object System.Drawing.Point(12, 622)
-        $script:GuiBtnUp.Anchor = 'Bottom,Left'
-
-        $btnFlat = New-Object System.Windows.Forms.Button
-        $btnFlat.Text = 'Top global'
-        $btnFlat.Size = New-Object System.Drawing.Size(100, 30)
-        $btnFlat.Location = New-Object System.Drawing.Point(108, 622)
-        $btnFlat.Anchor = 'Bottom,Left'
-
-        $btnOpen = New-Object System.Windows.Forms.Button
-        $btnOpen.Text = 'Abrir no Explorador'
-        $btnOpen.Size = New-Object System.Drawing.Size(140, 30)
-        $btnOpen.Location = New-Object System.Drawing.Point(214, 622)
-        $btnOpen.Anchor = 'Bottom,Left'
-
-        $btnCopy = New-Object System.Windows.Forms.Button
-        $btnCopy.Text = 'Copiar caminho'
-        $btnCopy.Size = New-Object System.Drawing.Size(120, 30)
-        $btnCopy.Location = New-Object System.Drawing.Point(360, 622)
-        $btnCopy.Anchor = 'Bottom,Left'
-
-        $btnCsv = New-Object System.Windows.Forms.Button
-        $btnCsv.Text = 'Exportar CSV'
-        $btnCsv.Size = New-Object System.Drawing.Size(110, 30)
-        $btnCsv.Location = New-Object System.Drawing.Point(486, 622)
-        $btnCsv.Anchor = 'Bottom,Left'
-
-        $btnExit = New-Object System.Windows.Forms.Button
-        $btnExit.Text = 'Sair'
-        $btnExit.Size = New-Object System.Drawing.Size(80, 30)
-        $btnExit.Location = New-Object System.Drawing.Point(602, 622)
-        $btnExit.Anchor = 'Bottom,Left'
-
-        $hint = New-Object System.Windows.Forms.Label
-        $hint.Text = 'Duplo-clique/Enter = entrar. Backspace = subir. Clique direito = mais opcoes.'
-        $hint.AutoSize = $true
-        $hint.ForeColor = [System.Drawing.Color]::Gray
-        $hint.Location = New-Object System.Drawing.Point(694, 629)
-        $hint.Anchor = 'Bottom,Left'
-
-        $ctx = New-Object System.Windows.Forms.ContextMenuStrip
-        $miOpen = $ctx.Items.Add('Abrir no Explorador')
-        $miCopy = $ctx.Items.Add('Copiar caminho')
-        $miSub  = $ctx.Items.Add('Exportar esta sub-arvore (CSV)...')
-        $miOpen.Add_Click({ $n = Get-GuiSelectedNode; if ($n) { Invoke-OpenInExplorer $n.Path } })
-        $miCopy.Add_Click({ $n = Get-GuiSelectedNode; if ($n) { Copy-PathToClipboard $n.Path } })
-        $miSub.Add_Click({
-            $n = Get-GuiSelectedNode; if (-not $n) { return }
-            $sfd = New-Object System.Windows.Forms.SaveFileDialog
-            $sfd.Filter = 'CSV (*.csv)|*.csv'
-            $sfd.FileName = ($n.Name -replace '[^\w\.-]', '_') + '.csv'
-            if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-                Export-TreeCsv -node $n -CsvPath $sfd.FileName
-                [System.Windows.Forms.MessageBox]::Show("Exportado:`n$($sfd.FileName)", 'CSV') | Out-Null
-            }
-        })
-        $script:GuiGrid.ContextMenuStrip = $ctx
-        $script:GuiGrid.Add_CellMouseDown({
+        $script:Ui.Grid.ContextMenuStrip = New-GuiContextMenu
+        $script:Ui.Grid.Add_CellMouseDown({
             param($s, $e)
             if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right -and $e.RowIndex -ge 0) {
-                $script:GuiGrid.ClearSelection()
-                $script:GuiGrid.Rows[$e.RowIndex].Selected = $true
-                $script:GuiGrid.CurrentCell = $script:GuiGrid.Rows[$e.RowIndex].Cells[0]
+                $script:Ui.Grid.ClearSelection()
+                $script:Ui.Grid.Rows[$e.RowIndex].Selected = $true
+                $script:Ui.Grid.CurrentCell = $script:Ui.Grid.Rows[$e.RowIndex].Cells[0]
             }
         })
 
-        $form.Controls.AddRange(@($script:GuiLbl, $lblFil, $script:GuiFilterBox, $script:GuiGrid, $script:GuiBtnUp, $btnFlat, $btnOpen, $btnCopy, $btnCsv, $btnExit, $hint))
+        $form.Controls.AddRange(@($script:Ui.Lbl, $lblFil, $script:Ui.FilterBox, $script:Ui.Grid, $script:Ui.BtnUp, $btnFlat, $btnOpen, $btnCopy, $btnCsv, $btnExit, $hint))
 
         # Filtro por nome (ou caminho, na vista Top global) sobre a lista atual.
-        $script:GuiFilterBox.Add_TextChanged({
+        $script:Ui.FilterBox.Add_TextChanged({
             try {
-                $view = $script:GuiGrid.DataSource.DefaultView
-                $v = $script:GuiFilterBox.Text
+                $view = $script:Ui.Grid.DataSource.DefaultView
+                $v = $script:Ui.FilterBox.Text
                 if ([string]::IsNullOrWhiteSpace($v)) { $view.RowFilter = '' ; return }
                 $esc = $v -replace "'", "''" -replace '\[', '[[]' -replace '%', '[%]' -replace '\*', '[*]'
-                $col = if ($script:GuiFlat) { 'Caminho' } else { 'Nome' }
+                $col = if ($script:Ui.Flat) { 'Caminho' } else { 'Nome' }
                 $view.RowFilter = "[$col] LIKE '%$esc%'"
             } catch { }
         })
 
-        $script:GuiGrid.Add_CellDoubleClick({ param($s, $e) Enter-GuiRow $e.RowIndex })
+        $script:Ui.Grid.Add_CellDoubleClick({ param($s, $e) Enter-GuiRow $e.RowIndex })
         # Ordenacao correcta da coluna "Tamanho" (texto formatado) -> ordena pela
         # coluna oculta 'Bytes'. 1o clique = maiores primeiro; alterna depois.
-        $script:GuiGrid.Add_ColumnHeaderMouseClick({
+        $script:Ui.Grid.Add_ColumnHeaderMouseClick({
             param($s, $e)
             if ($e.ColumnIndex -lt 0) { return }
-            if ($script:GuiGrid.Columns[$e.ColumnIndex].Name -ne 'Tamanho') { return }
+            if ($script:Ui.Grid.Columns[$e.ColumnIndex].Name -ne 'Tamanho') { return }
             try {
-                $cur = [string]$script:GuiGrid.DataSource.DefaultView.Sort
+                $cur = [string]$script:Ui.Grid.DataSource.DefaultView.Sort
                 $new = if ($cur -eq 'Bytes DESC') { 'Bytes ASC' } else { 'Bytes DESC' }
-                $script:GuiGrid.DataSource.DefaultView.Sort = $new
+                $script:Ui.Grid.DataSource.DefaultView.Sort = $new
                 $glyph = if ($new -eq 'Bytes DESC') { 'Descending' } else { 'Ascending' }
-                $script:GuiGrid.Columns['Tamanho'].HeaderCell.SortGlyphDirection = $glyph
+#endregion
+
+                $script:Ui.Grid.Columns['Tamanho'].HeaderCell.SortGlyphDirection = $glyph
             } catch { }
         })
-        $script:GuiGrid.Add_KeyDown({
+        $script:Ui.Grid.Add_KeyDown({
             param($s, $e)
-            if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter -and $script:GuiGrid.CurrentRow) {
-                Enter-GuiRow $script:GuiGrid.CurrentRow.Index
+            if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter -and $script:Ui.Grid.CurrentRow) {
+                Enter-GuiRow $script:Ui.Grid.CurrentRow.Index
                 $e.Handled = $true
             }
             elseif ($e.KeyCode -eq [System.Windows.Forms.Keys]::Back) {
-                if (-not $script:GuiFlat -and $script:GuiStack.Count -gt 0) {
-                    $script:GuiCurrent = $script:GuiStack.Pop(); Update-GuiGrid
+                if (-not $script:Ui.Flat -and $script:Ui.Stack.Count -gt 0) {
+                    $script:Ui.Current = $script:Ui.Stack.Pop(); Update-GuiGrid
                 }
                 $e.Handled = $true
             }
         })
-        $script:GuiBtnUp.Add_Click({
-            if ($script:GuiStack.Count -gt 0) {
-                $script:GuiCurrent = $script:GuiStack.Pop()
+        $script:Ui.BtnUp.Add_Click({
+            if ($script:Ui.Stack.Count -gt 0) {
+                $script:Ui.Current = $script:Ui.Stack.Pop()
                 Update-GuiGrid
             }
         })
         $btnFlat.Add_Click({
-            $script:GuiFlat = -not $script:GuiFlat
-            $btnFlat.Text = if ($script:GuiFlat) { 'Navegar' } else { 'Top global' }
+            $script:Ui.Flat = -not $script:Ui.Flat
+            $btnFlat.Text = if ($script:Ui.Flat) { 'Navegar' } else { 'Top global' }
             Update-GuiGrid
         })
         $btnOpen.Add_Click({ $n = Get-GuiSelectedNode; if ($n) { Invoke-OpenInExplorer $n.Path } })
@@ -1344,7 +1421,7 @@ function Show-Gui {
             $sfd.Filter = 'CSV (*.csv)|*.csv'
             $sfd.FileName = 'FolderSizes.csv'
             if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-                Export-TreeCsv -node $script:GuiRoot -CsvPath $sfd.FileName
+                Export-TreeCsv -node $script:Ui.Root -CsvPath $sfd.FileName
                 [System.Windows.Forms.MessageBox]::Show("Exportado:`n$($sfd.FileName)", 'CSV') | Out-Null
             }
         })
@@ -1407,22 +1484,22 @@ $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $root = Get-FolderNode -DisplayPath $Path
 $sw.Stop()
 Write-Progress -Activity 'A analisar...' -Completed
-if ($script:CancelRequested) { $script:Partial = $true }
+if ($script:Scan.CancelRequested) { $script:Scan.Partial = $true }
 Close-ProgressWindow
 
 # Resumo
 Write-Host ''
 Write-Host '================= RESUMO =================' -ForegroundColor Green
-if ($script:Partial) { Write-Host '  *** SCAN CANCELADO - resultados PARCIAIS ***' -ForegroundColor Red }
+if ($script:Scan.Partial) { Write-Host '  *** SCAN CANCELADO - resultados PARCIAIS ***' -ForegroundColor Red }
 Write-Host ("Caminho        : $($root.Path)")
-Write-Host ("Tamanho total  : $(if (-not $root.Complete) { '>=' })$(Format-Size $root.Size)")
+Write-Host ("Tamanho total  : $(Format-SizeQualified $root)")
 Write-Host ("Ficheiros      : $($root.FileCount)")
 Write-Host ("Subpastas      : $($root.DirCount)")
 Write-Host ("Fich. + recente: $(Format-Date $root.MaxMtime) (data do ficheiro mais recente da arvore)")
-Write-Host ("Caminhos >260  : $($script:LongPaths.Count)")
-Write-Host ("Junctions/links: $($script:SkipReparse) (ignorados; placeholders da cloud sao percorridos)")
-Write-Host ("Sem acesso     : $(@($script:DeniedDirs | Select-Object -Unique).Count) pasta(s), $(@($script:DeniedItems | Select-Object -Unique).Count) item(ns)")
-Write-Host ("Erros no scan  : $($script:ErrCount)")
+Write-Host ("Caminhos >260  : $($script:Scan.LongPaths.Count)")
+Write-Host ("Junctions/links: $($script:Scan.SkipReparse) (ignorados; placeholders da cloud sao percorridos)")
+Write-Host ("Sem acesso     : $(@($script:Scan.DeniedDirs | Select-Object -Unique).Count) pasta(s), $(@($script:Scan.DeniedItems | Select-Object -Unique).Count) item(ns)")
+Write-Host ("Erros no scan  : $($script:Scan.ErrCount)")
 $incompleteN = Get-IncompleteCount -root $root
 if ($incompleteN -eq 0) {
     Write-Host ("Cobertura      : COMPLETA")
@@ -1455,7 +1532,7 @@ if ($HtmlOut) {
 }
 
 # Pastas sem acesso (cobertura honesta do diagnostico)
-$ddirs = @($script:DeniedDirs | Select-Object -Unique)
+$ddirs = @($script:Scan.DeniedDirs | Select-Object -Unique)
 if ($ddirs.Count -gt 0) {
     Write-Host ''
     Write-Host "--- Pastas NAO medidas (sem acesso) - $($ddirs.Count) ---" -ForegroundColor DarkYellow
@@ -1465,10 +1542,10 @@ if ($ddirs.Count -gt 0) {
 }
 
 # Caminhos > 260
-if ($script:LongPaths.Count -gt 0) {
+if ($script:Scan.LongPaths.Count -gt 0) {
     Write-Host ''
     Write-Host "--- Caminhos > 260 caracteres (top 20 por tamanho) ---" -ForegroundColor Magenta
-    $script:LongPaths | Sort-Object Size -Descending | Select-Object -First 20 |
+    $script:Scan.LongPaths | Sort-Object Size -Descending | Select-Object -First 20 |
         ForEach-Object { Write-Host ('  {0,-9} {1,10}  len={2}  {3}' -f $_.Type, (Format-Size $_.Size), $_.Length, $_.Path) }
 }
 
@@ -1489,10 +1566,10 @@ if ($Gui) {
 }
 
 # Erros detalhados
-if ($script:ErrCount -gt 0) {
+if ($script:Scan.ErrCount -gt 0) {
     Write-Host ''
-    Write-Host "Nota: $($script:ErrCount) itens nao puderam ser lidos (permissoes/etc). Primeiros 10:" -ForegroundColor DarkYellow
-    $script:Errors | Select-Object -First 10 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkYellow }
+    Write-Host "Nota: $($script:Scan.ErrCount) itens nao puderam ser lidos (permissoes/etc). Primeiros 10:" -ForegroundColor DarkYellow
+    $script:Scan.Errors | Select-Object -First 10 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkYellow }
 }
 
-if ($script:Partial) { exit 2 }
+if ($script:Scan.Partial) { exit 2 }
