@@ -27,8 +27,13 @@
     (Ignorado quando -Interactive esta ativo.)
 
 .PARAMETER Interactive
-    Ativa a navegacao interativa (recomendado). Se nem -Interactive nem -Depth
-    forem especificados, o modo interativo e usado por omissao.
+    Ativa a navegacao interativa na consola. Se nem -Gui, nem -Interactive, nem
+    -Depth forem especificados, o modo interativo de consola e usado por omissao.
+
+.PARAMETER Gui
+    Abre uma JANELA GRAFICA (WinForms) para navegar a arvore por duplo-clique,
+    estilo TreeSize. A navegacao e instantanea (usa a arvore ja em memoria).
+    Nao precisa de admin; funciona em consola local ou RDP (nao em SSH puro).
 
 .PARAMETER ShowExtensions
     Mostra o breakdown por extensao (top tipos de ficheiro) em cada pasta.
@@ -41,7 +46,11 @@
 
 .EXAMPLE
     .\Analyze-FolderSizes.ps1 -Path '\\servidor\share\Projetos'
-    # scan + navegacao interativa
+    # scan + navegacao interativa na consola
+
+.EXAMPLE
+    .\Analyze-FolderSizes.ps1 -Path '\\servidor\share\Projetos' -Gui
+    # scan + JANELA GRAFICA: duplo-clique para entrar nas pastas (estilo TreeSize)
 
 .EXAMPLE
     .\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -Depth 2 -Top 10 -ShowExtensions
@@ -57,6 +66,7 @@ param(
     [int]    $Top = 15,
     [int]    $Depth = 0,
     [switch] $Interactive,
+    [switch] $Gui,
     [switch] $ShowExtensions,
     [string[]] $Exclude = @(),
     [string] $CsvOut
@@ -277,6 +287,176 @@ function Start-Interactive {
 }
 
 # ----------------------------------------------------------------------------
+# Janela grafica (WinForms) sobre a arvore JA em memoria -> navegacao instantanea.
+# Nao precisa de admin. Funciona em PowerShell 5.1 e 7+ num ambiente com desktop
+# (consola local ou sessao RDP). Nao funciona em SSH puro sem interface grafica.
+# ----------------------------------------------------------------------------
+function Show-Gui {
+    param($root)
+
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+    }
+    catch {
+        Write-Warning "Nao foi possivel carregar a interface grafica (WinForms). Usa -Interactive (modo consola)."
+        Start-Interactive -root $root -top $Top
+        return
+    }
+
+    # Estado de navegacao (script-scope para os event handlers verem as alteracoes)
+    $script:GuiCurrent = $root
+    $script:GuiStack   = New-Object System.Collections.Generic.Stack[object]
+    $script:GuiNodes   = @()
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = 'Folder Size Analyzer'
+    $form.Size = New-Object System.Drawing.Size(1120, 700)
+    $form.StartPosition = 'CenterScreen'
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Location = New-Object System.Drawing.Point(12, 12)
+    $lbl.Size = New-Object System.Drawing.Size(1080, 40)
+    $lbl.Anchor = 'Top,Left,Right'
+    $lbl.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
+
+    $grid = New-Object System.Windows.Forms.DataGridView
+    $grid.Location = New-Object System.Drawing.Point(12, 58)
+    $grid.Size = New-Object System.Drawing.Size(1080, 552)
+    $grid.Anchor = 'Top,Bottom,Left,Right'
+    $grid.ReadOnly = $true
+    $grid.AllowUserToAddRows = $false
+    $grid.AllowUserToDeleteRows = $false
+    $grid.RowHeadersVisible = $false
+    $grid.MultiSelect = $false
+    $grid.SelectionMode = 'FullRowSelect'
+    $grid.AutoSizeColumnsMode = 'Fill'
+
+    $btnUp = New-Object System.Windows.Forms.Button
+    $btnUp.Text = 'Subir'
+    $btnUp.Size = New-Object System.Drawing.Size(110, 30)
+    $btnUp.Location = New-Object System.Drawing.Point(12, 622)
+    $btnUp.Anchor = 'Bottom,Left'
+
+    $btnCsv = New-Object System.Windows.Forms.Button
+    $btnCsv.Text = 'Exportar CSV'
+    $btnCsv.Size = New-Object System.Drawing.Size(130, 30)
+    $btnCsv.Location = New-Object System.Drawing.Point(130, 622)
+    $btnCsv.Anchor = 'Bottom,Left'
+
+    $btnExit = New-Object System.Windows.Forms.Button
+    $btnExit.Text = 'Sair'
+    $btnExit.Size = New-Object System.Drawing.Size(90, 30)
+    $btnExit.Location = New-Object System.Drawing.Point(268, 622)
+    $btnExit.Anchor = 'Bottom,Left'
+
+    $hint = New-Object System.Windows.Forms.Label
+    $hint.Text = 'Duplo-clique numa pasta para entrar.'
+    $hint.AutoSize = $true
+    $hint.ForeColor = [System.Drawing.Color]::Gray
+    $hint.Location = New-Object System.Drawing.Point(380, 629)
+    $hint.Anchor = 'Bottom,Left'
+
+    $form.Controls.AddRange(@($lbl, $grid, $btnUp, $btnCsv, $btnExit, $hint))
+
+    # Reconstroi a tabela a partir do no atual (instantaneo: ja esta tudo em memoria)
+    function Update-Grid {
+        $node = $script:GuiCurrent
+        $script:GuiNodes = @($node.Children | Sort-Object Size -Descending)
+
+        $dt = New-Object System.Data.DataTable
+        [void]$dt.Columns.Add('Nome', [string])
+        [void]$dt.Columns.Add('Tamanho', [string])
+        [void]$dt.Columns.Add('%', [double])
+        [void]$dt.Columns.Add('Ficheiros', [int])
+        [void]$dt.Columns.Add('Subpastas', [int])
+        [void]$dt.Columns.Add('Tipos', [string])
+        [void]$dt.Columns.Add('Idx', [int])
+
+        $i = 0
+        foreach ($c in $script:GuiNodes) {
+            $pct = 0.0
+            if ($node.Size -gt 0) { $pct = [math]::Round(($c.Size / $node.Size) * 100, 1) }
+            $tipos = ''
+            if ($c.Ext.Count -gt 0) {
+                $tp = $c.Ext.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 3 |
+                      ForEach-Object { $_.Key }
+                $tipos = ($tp -join ', ')
+            }
+            [void]$dt.Rows.Add($c.Name, (Format-Size $c.Size), $pct, $c.FileCount, $c.DirCount, $tipos, $i)
+            $i++
+        }
+
+        $grid.DataSource = $dt
+        if ($grid.Columns['Idx']) { $grid.Columns['Idx'].Visible = $false }
+        if ($grid.Columns['Nome']) { $grid.Columns['Nome'].FillWeight = 240 }
+        if ($grid.Columns['Tipos']) { $grid.Columns['Tipos'].FillWeight = 180 }
+
+        $lbl.Text = ('{0}    —    Total: {1}  |  {2} ficheiros  |  {3} subpastas' -f `
+            $node.Path, (Format-Size $node.Size), $node.FileCount, $node.DirCount)
+        $btnUp.Enabled = ($script:GuiStack.Count -gt 0)
+    }
+
+    $enter = {
+        param($s, $e)
+        if ($e.RowIndex -lt 0) { return }
+        $idx = [int]$grid.Rows[$e.RowIndex].Cells['Idx'].Value
+        $target = $script:GuiNodes[$idx]
+        if ($target.Children.Count -gt 0) {
+            $script:GuiStack.Push($script:GuiCurrent)
+            $script:GuiCurrent = $target
+            Update-Grid
+        }
+    }
+    $grid.Add_CellDoubleClick($enter)
+    # Enter tambem entra na pasta selecionada
+    $grid.Add_KeyDown({
+        param($s, $e)
+        if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter -and $grid.CurrentRow) {
+            $idx = [int]$grid.CurrentRow.Cells['Idx'].Value
+            $target = $script:GuiNodes[$idx]
+            if ($target.Children.Count -gt 0) {
+                $script:GuiStack.Push($script:GuiCurrent)
+                $script:GuiCurrent = $target
+                Update-Grid
+            }
+            $e.Handled = $true
+        }
+    })
+
+    $btnUp.Add_Click({
+        if ($script:GuiStack.Count -gt 0) {
+            $script:GuiCurrent = $script:GuiStack.Pop()
+            Update-Grid
+        }
+    })
+
+    $btnCsv.Add_Click({
+        $sfd = New-Object System.Windows.Forms.SaveFileDialog
+        $sfd.Filter = 'CSV (*.csv)|*.csv'
+        $sfd.FileName = 'FolderSizes.csv'
+        if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $rows = New-Object System.Collections.Generic.List[object]
+            function FlattenGui($n) {
+                $rows.Add([pscustomobject]@{
+                    Path = $n.Path; SizeBytes = $n.Size; Size = (Format-Size $n.Size)
+                    Files = $n.FileCount; SubDirs = $n.DirCount })
+                foreach ($c in $n.Children) { FlattenGui $c }
+            }
+            FlattenGui $script:GuiCurrent
+            $rows | Sort-Object SizeBytes -Descending |
+                Export-Csv -LiteralPath $sfd.FileName -NoTypeInformation -Encoding UTF8
+            [System.Windows.Forms.MessageBox]::Show("Exportado para:`n$($sfd.FileName)", 'CSV') | Out-Null
+        }
+    })
+
+    $btnExit.Add_Click({ $form.Close() })
+
+    Update-Grid
+    [void]$form.ShowDialog()
+}
+
+# ----------------------------------------------------------------------------
 # Execucao
 # ----------------------------------------------------------------------------
 if (-not (Test-Path -LiteralPath $Path)) {
@@ -328,7 +508,9 @@ if ($script:LongPaths.Count -gt 0) {
 
 # Visualizacao granular
 Write-Host ''
-if ($Interactive -or $Depth -le 0) {
+if ($Gui) {
+    Show-Gui -root $root
+} elseif ($Interactive -or $Depth -le 0) {
     Start-Interactive -root $root -top $Top
 } else {
     Write-Host "--- Top $Top pastas ($Depth nivel(is)) ---" -ForegroundColor Cyan

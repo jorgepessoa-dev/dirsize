@@ -22,8 +22,10 @@ Este script resolve os três problemas usando apenas PowerShell + .NET
 - **Long paths (>260)** — usa o prefixo estendido `\\?\` / `\\?\UNC\` para ignorar
   o MAX_PATH. No fim lista os ficheiros cujo caminho passa os 260 caracteres.
 - **Granular** — faz **um** scan e guarda a árvore em memória. Depois navegas:
-  em modo **interativo** (afundas numa pasta só quando escolheres), ou em modo
-  **relatório** com profundidade fixa.
+  em **janela gráfica** (`-Gui`, duplo-clique para entrar, estilo TreeSize),
+  em modo **interativo de consola** (afundas numa pasta só quando escolheres),
+  ou em modo **relatório** com profundidade fixa. A navegação é **instantânea**
+  porque parte da árvore já em memória — não recalcula pastas ao entrar.
 - **Pista do "assunto" sem semântica** — `-ShowExtensions` mostra o breakdown por
   extensão de cada pasta (que *tipo* de conteúdo predomina: docs, vídeos, zips…).
 - **Junctions / symlinks ignorados** — evita contagens duplicadas e loops.
@@ -32,7 +34,10 @@ Este script resolve os três problemas usando apenas PowerShell + .NET
 ## Utilização
 
 ```powershell
-# Modo interativo (default) — afundas camada a camada só onde quiseres
+# Janela gráfica (estilo TreeSize) — duplo-clique para entrar nas pastas
+.\Analyze-FolderSizes.ps1 -Path '\\servidor\share\Pasta' -Gui
+
+# Modo interativo de consola (default) — afundas camada a camada só onde quiseres
 .\Analyze-FolderSizes.ps1 -Path '\\servidor\share\Pasta'
 
 # Relatório fixo de 2 níveis, top 10, com tipos de ficheiro
@@ -52,7 +57,18 @@ corre **sem alterar nada no sistema**, só para esta invocação:
 powershell -ExecutionPolicy Bypass -File .\Analyze-FolderSizes.ps1 -Path '\\servidor\share'
 ```
 
-### No modo interativo
+### Na janela gráfica (`-Gui`)
+
+- **Duplo-clique** (ou Enter) numa linha → entra na pasta.
+- **Subir** → volta ao nível anterior.
+- **Exportar CSV** → grava a subárvore atual num ficheiro à tua escolha.
+- Clica no cabeçalho de uma coluna para ordenar (por nº de ficheiros, etc.).
+
+> A janela usa WinForms (incluído no Windows, sem admin). Funciona em consola
+> local e em sessão **RDP**; não funciona em SSH puro sem interface gráfica —
+> nesse caso usa o modo interativo de consola abaixo.
+
+### No modo interativo de consola
 
 | Tecla | Ação |
 |-------|------|
@@ -68,7 +84,8 @@ powershell -ExecutionPolicy Bypass -File .\Analyze-FolderSizes.ps1 -Path '\\serv
 | `-Path` | Localização a analisar (obrigatório) | — |
 | `-Top` | Nº de pastas a mostrar por nível | `15` |
 | `-Depth` | Modo relatório: nº de camadas a imprimir de uma vez | `0` (= interativo) |
-| `-Interactive` | Força o modo interativo | — |
+| `-Gui` | Abre a janela gráfica (duplo-clique para entrar) | — |
+| `-Interactive` | Força o modo interativo de consola | — |
 | `-ShowExtensions` | Mostra tipos de ficheiro por pasta | desligado |
 | `-Exclude` | Nomes de pasta a ignorar (wildcards) | — |
 | `-CsvOut` | Caminho para exportar a árvore em CSV | — |
