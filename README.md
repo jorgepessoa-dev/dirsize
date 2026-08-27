@@ -1,6 +1,6 @@
-# folder-size-audit
+# dirsize
 
-`Measure-FolderSizes.ps1` — mede o espaço ocupado por pastas (local ou `\\servidor\share`),
+`dirsize.ps1` — mede o espaço ocupado por pastas (local ou `\\servidor\share`),
 **sem admin**, com suporte a caminhos **> 260 caracteres**. Windows PowerShell 5.1.
 
 Faz **um** scan para memória; depois navega em janela gráfica (`-Gui`), consola interativa
@@ -8,32 +8,32 @@ Faz **um** scan para memória; depois navega em janela gráfica (`-Gui`), consol
 
 ## Usar
 
-Duplo-clique em **`Analisar-Pastas.cmd`** — abre janela para escolher a pasta (com histórico).
+Duplo-clique em **`Pastas.cmd`** — abre janela para escolher a pasta (com histórico).
 
 Ou por linha de comando:
 
 ```powershell
 # janela gráfica: scan com progresso + Cancelar, depois navegação
-.\Measure-FolderSizes.ps1 -Path '\\servidor\share' -Gui
+.\dirsize.ps1 -Path '\\servidor\share' -Gui
 
 # relatório: 2 níveis + as 50 maiores pastas de toda a árvore
-.\Measure-FolderSizes.ps1 -Path '\\servidor\share' -Depth 2 -Top 20 -FlatTop 50
+.\dirsize.ps1 -Path '\\servidor\share' -Depth 2 -Top 20 -FlatTop 50
 
 # relatório HTML + snapshot para comparar depois
-.\Measure-FolderSizes.ps1 -Path '\\servidor\share' -HtmlOut rel.html -SnapshotOut hoje.json
+.\dirsize.ps1 -Path '\\servidor\share' -HtmlOut rel.html -SnapshotOut hoje.json
 
 # o que mudou desde um snapshot anterior
-.\Measure-FolderSizes.ps1 -Path '\\servidor\share' -CompareWith hoje.json -HtmlOut evolucao.html
+.\dirsize.ps1 -Path '\\servidor\share' -CompareWith hoje.json -HtmlOut evolucao.html
 ```
 
 Se o `.ps1` for bloqueado ("not digitally signed" / MOTW), desbloqueia e corre:
 
 ```powershell
 Get-ChildItem *.ps1 | Unblock-File
-powershell -ExecutionPolicy Bypass -File .\Measure-FolderSizes.ps1 -Path '\\servidor\share'
+powershell -ExecutionPolicy Bypass -File .\dirsize.ps1 -Path '\\servidor\share'
 ```
 
-O `Analisar-Pastas.cmd` já faz as duas coisas (numa GPO corporativa com `MachinePolicy
+O `Pastas.cmd` já faz as duas coisas (numa GPO corporativa com `MachinePolicy
 RemoteSigned`, o `-ExecutionPolicy Bypass` é ignorado — o que resolve é o `Unblock-File`).
 Com `MachinePolicy AllSigned` só assinando o script.
 
@@ -81,7 +81,7 @@ copiar caminho / exportar sub-árvore.
   raiz. Filtra `Complete = True` para trabalhar só com números exatos.
 - Cancelar o scan → resultados parciais (exit code 2).
 - O 1.º scan de um share grande demora (percorre tudo uma vez); depois a navegação é instantânea.
-- Estado por utilizador em `%APPDATA%\FolderAnalyzer` (histórico, tamanho da janela).
+- Estado por utilizador em `%APPDATA%\dirsize` (histórico, tamanho da janela).
 
 ## Licença
 

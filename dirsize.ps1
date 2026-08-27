@@ -70,23 +70,23 @@
     Mostra a versao e sai.
 
 .EXAMPLE
-    .\Measure-FolderSizes.ps1
+    .\dirsize.ps1
     # sem argumentos: janela para ESCOLHER a pasta (com historico) e resultados em janela
 
 .EXAMPLE
-    .\Measure-FolderSizes.ps1 -Path '\\servidor\share' -Gui
+    .\dirsize.ps1 -Path '\\servidor\share' -Gui
     # scan (com janela de progresso + Cancelar) + JANELA GRAFICA para navegar
 
 .EXAMPLE
-    .\Measure-FolderSizes.ps1 -Path '\\servidor\share' -Depth 2 -Top 20 -FlatTop 50
+    .\dirsize.ps1 -Path '\\servidor\share' -Depth 2 -Top 20 -FlatTop 50
     # relatorio de 2 niveis + as 50 maiores pastas de toda a arvore
 
 .EXAMPLE
-    .\Measure-FolderSizes.ps1 -Path '\\servidor\share' -HtmlOut rel.html -SnapshotOut hoje.json
+    .\dirsize.ps1 -Path '\\servidor\share' -HtmlOut rel.html -SnapshotOut hoje.json
     # relatorio HTML + snapshot para comparar no futuro
 
 .EXAMPLE
-    .\Measure-FolderSizes.ps1 -Path '\\servidor\share' -CompareWith mes-passado.json -HtmlOut evolucao.html
+    .\dirsize.ps1 -Path '\\servidor\share' -CompareWith mes-passado.json -HtmlOut evolucao.html
     # o que mudou desde o snapshot anterior
 #>
 [CmdletBinding()]
@@ -110,16 +110,16 @@ param(
 $ErrorActionPreference = 'Stop'
 $script:AppVersion = '2.0'
 
-if ($Version) { Write-Host "Measure-FolderSizes v$($script:AppVersion)"; exit 0 }
+if ($Version) { Write-Host "dirsize v$($script:AppVersion)"; exit 0 }
 
 # ----------------------------------------------------------------------------
 # Definicoes / estado da app (historico de caminhos, tamanho da janela),
-# guardados em %APPDATA%\FolderAnalyzer. Tudo tolera falha (devolve default).
+# guardados em %APPDATA%\dirsize. Tudo tolera falha (devolve default).
 # Alvo: Windows PowerShell 5.1 (o que vem no Windows 11). Nao requer PS 7.
 # ----------------------------------------------------------------------------
 function Get-AppDataDir {
     try {
-        $d = Join-Path $env:APPDATA 'FolderAnalyzer'
+        $d = Join-Path $env:APPDATA 'dirsize'
         if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
         return $d
     } catch { return $null }

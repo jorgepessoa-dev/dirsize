@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A PowerShell script (`Measure-FolderSizes.ps1`) that measures disk usage of a folder tree
+A PowerShell script (`dirsize.ps1`) that measures disk usage of a folder tree
 (local or `\\server\share`) without requiring admin rights, and handles paths longer than 260
 characters (MAX_PATH). It scans once into an in-memory tree, then offers three ways to browse
 the result: a WinForms GUI (`-Gui`, TreeSize-style drill-down), an interactive console mode
-(default), or a fixed-depth report mode (`-Depth`). `Analisar-Pastas.cmd` is a double-click
+(default), or a fixed-depth report mode (`-Depth`). `Pastas.cmd` is a double-click
 launcher (wraps `powershell -ExecutionPolicy Bypass -File ...`). No package manifest, no
 automated test suite.
 
@@ -20,7 +20,7 @@ tracks access-denied folders separately (`$script:Denied`, listed in output/HTML
 WinForms progress window with Cancel during the scan (`Show-ProgressWindow`, DoEvents pump;
 cancel yields a partial tree and exit code 2), and exports HTML (`-HtmlOut`), JSON snapshots
 (`-SnapshotOut`) plus snapshot diffing (`-CompareWith`). A per-user store in
-`%APPDATA%\FolderAnalyzer` keeps the recent-paths history (`recent.txt`) and GUI window
+`%APPDATA%\dirsize` keeps the recent-paths history (`recent.txt`) and GUI window
 size/position (`settings.json`); all reads/writes there are best-effort (tolerate failure).
 
 Comments, `Write-Host` output, and docs are in European Portuguese (pt-PT); keep new code
@@ -34,28 +34,28 @@ directly under Windows PowerShell 5.1:
 
 ```powershell
 # report mode + every exporter, no GUI (progress window suppressed)
-.\Measure-FolderSizes.ps1 -Path . -Depth 2 -Top 10 -FlatTop 20 -ShowExtensions -NoProgressGui `
+.\dirsize.ps1 -Path . -Depth 2 -Top 10 -FlatTop 20 -ShowExtensions -NoProgressGui `
   -CsvOut out.csv -HtmlOut out.html -SnapshotOut snap.json
 
 # snapshot diff (run once to make snap.json, change something, run again)
-.\Measure-FolderSizes.ps1 -Path . -Depth 1 -NoProgressGui -CompareWith snap.json -HtmlOut evol.html
+.\dirsize.ps1 -Path . -Depth 1 -NoProgressGui -CompareWith snap.json -HtmlOut evol.html
 
 # GUI path (scan progress window + navigation window)
-.\Measure-FolderSizes.ps1 -Path . -Gui
+.\dirsize.ps1 -Path . -Gui
 
 # if execution policy blocks local scripts, run without changing system settings
-powershell -ExecutionPolicy Bypass -File .\Measure-FolderSizes.ps1 -Path .
+powershell -ExecutionPolicy Bypass -File .\dirsize.ps1 -Path .
 ```
 
 Syntax-check without running:
 
 ```powershell
-[System.Management.Automation.Language.Parser]::ParseFile('Measure-FolderSizes.ps1', [ref]$null, [ref]$null)
+[System.Management.Automation.Language.Parser]::ParseFile('dirsize.ps1', [ref]$null, [ref]$null)
 ```
 
 ## Architecture
 
-Everything is in `Measure-FolderSizes.ps1`, organized top-to-bottom as:
+Everything is in `dirsize.ps1`, organized top-to-bottom as:
 
 1. **Helpers** — `ConvertTo-ExtendedPath` (adds the `\\?\` / `\\?\UNC\` prefix to bypass
    MAX_PATH), `Format-Size`, `Test-Excluded` (wildcard folder exclusion), and the
@@ -124,7 +124,7 @@ Everything is in `Measure-FolderSizes.ps1`, organized top-to-bottom as:
   column and `SortMode = Programmatic`, and the `ColumnHeaderMouseClick` handler sorts the
   `DefaultView` by `Bytes`. Any new size/date column shown as text needs the same treatment
   (add a hidden real-typed column, don't let it auto-sort as text).
-- `Analisar-Pastas.cmd` runs `Unblock-File` on the `.ps1` before launching: a corporate
+- `Pastas.cmd` runs `Unblock-File` on the `.ps1` before launching: a corporate
   `MachinePolicy` GPO overrides `-ExecutionPolicy Bypass`, so removing MOTW is what actually
   lets a downloaded copy run under `RemoteSigned`.
 - Reparse points are inspected by tag (`Test-IsJunctionOrSymlink`, via `FindFirstFileW`):
@@ -151,5 +151,5 @@ Everything is in `Measure-FolderSizes.ps1`, organized top-to-bottom as:
 
 ## Repo contents
 
-`Measure-FolderSizes.ps1` (the script), `Analisar-Pastas.cmd` (double-click launcher),
+`dirsize.ps1` (the script), `Pastas.cmd` (double-click launcher),
 `README.md`, `LICENSE`. Nothing else — the old `tools/` review helpers were removed.
