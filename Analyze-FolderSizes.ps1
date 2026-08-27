@@ -46,39 +46,132 @@
 .PARAMETER CsvOut
     Caminho para exportar a arvore completa (uma linha por pasta) em CSV.
 
+.PARAMETER HtmlOut
+    Caminho para exportar um relatorio HTML autonomo (resumo + Pareto + top pastas
+    + categorias + pastas sem acesso). Ideal para enviar a alguem.
+
+.PARAMETER SnapshotOut
+    Caminho para gravar um snapshot JSON (lista plana de pastas + tamanhos).
+    Base para comparar com scans futuros (-CompareWith).
+
+.PARAMETER CompareWith
+    Caminho de um snapshot JSON anterior. Mostra o que cresceu/encolheu desde
+    entao (top variacoes, pastas novas e removidas). Entra tambem no HTML.
+
+.PARAMETER FlatTop
+    Numero de pastas a listar na vista "Top de TODA a arvore" (lista plana, nao
+    por nivel). 0 (default) = nao mostra na consola. A janela grafica tem sempre
+    o botao "Top global".
+
+.PARAMETER NoProgressGui
+    Nao mostra a janela de progresso durante o scan (usa so a barra da consola).
+
+.PARAMETER Version
+    Mostra a versao e sai.
+
 .EXAMPLE
     .\Analyze-FolderSizes.ps1
-    # sem argumentos: abre janela para ESCOLHER a pasta e mostra resultados em janela
+    # sem argumentos: janela para ESCOLHER a pasta (com historico) e resultados em janela
 
 .EXAMPLE
-    .\Analyze-FolderSizes.ps1 -Path '\\servidor\share\Projetos'
-    # scan + navegacao interativa na consola
+    .\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -Gui
+    # scan (com janela de progresso + Cancelar) + JANELA GRAFICA para navegar
 
 .EXAMPLE
-    .\Analyze-FolderSizes.ps1 -Path '\\servidor\share\Projetos' -Gui
-    # scan + JANELA GRAFICA: duplo-clique para entrar nas pastas (estilo TreeSize)
+    .\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -Depth 2 -Top 20 -FlatTop 50
+    # relatorio de 2 niveis + as 50 maiores pastas de toda a arvore
 
 .EXAMPLE
-    .\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -Depth 2 -Top 10 -ShowExtensions
-    # relatorio de 2 niveis, top 10 por nivel, com tipos de ficheiro
+    .\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -HtmlOut rel.html -SnapshotOut hoje.json
+    # relatorio HTML + snapshot para comparar no futuro
 
 .EXAMPLE
-    .\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -CsvOut relatorio.csv
-    # scan + exporta tudo para CSV
+    .\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -CompareWith mes-passado.json -HtmlOut evolucao.html
+    # o que mudou desde o snapshot anterior
 #>
 [CmdletBinding()]
 param(
-    [string] $Path,
-    [int]    $Top = 15,
-    [int]    $Depth = 0,
-    [switch] $Interactive,
-    [switch] $Gui,
-    [switch] $ShowExtensions,
+    [string]   $Path,
+    [int]      $Top = 15,
+    [int]      $Depth = 0,
+    [switch]   $Interactive,
+    [switch]   $Gui,
+    [switch]   $ShowExtensions,
     [string[]] $Exclude = @(),
-    [string] $CsvOut
+    [string]   $CsvOut,
+    [string]   $HtmlOut,
+    [string]   $SnapshotOut,
+    [string]   $CompareWith,
+    [int]      $FlatTop = 0,
+    [switch]   $NoProgressGui,
+    [switch]   $Version
 )
 
 $ErrorActionPreference = 'Stop'
+$script:AppVersion = '2.0'
+
+if ($Version) { Write-Host "Analyze-FolderSizes v$($script:AppVersion)"; exit 0 }
+
+# ----------------------------------------------------------------------------
+# Definicoes / estado da app (historico de caminhos, tamanho da janela),
+# guardados em %APPDATA%\FolderAnalyzer. Tudo tolera falha (devolve default).
+# Alvo: Windows PowerShell 5.1 (o que vem no Windows 11). Nao requer PS 7.
+# ----------------------------------------------------------------------------
+function Get-AppDataDir {
+    try {
+        $d = Join-Path $env:APPDATA 'FolderAnalyzer'
+        if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+        return $d
+    } catch { return $null }
+}
+
+function Get-RecentPaths {
+    try {
+        $d = Get-AppDataDir; if (-not $d) { return @() }
+        $f = Join-Path $d 'recent.txt'
+        if (-not (Test-Path -LiteralPath $f)) { return @() }
+        return @(Get-Content -LiteralPath $f -Encoding UTF8 | Where-Object { $_.Trim() })
+    } catch { return @() }
+}
+
+function Add-RecentPath {
+    param([string] $p)
+    try {
+        if ([string]::IsNullOrWhiteSpace($p)) { return }
+        $d = Get-AppDataDir; if (-not $d) { return }
+        $f = Join-Path $d 'recent.txt'
+        $list = @(Get-RecentPaths | Where-Object { $_ -ne $p -and $_.ToLower() -ne $p.ToLower() })
+        $list = @($p) + $list | Select-Object -First 8
+        Set-Content -LiteralPath $f -Value $list -Encoding UTF8
+    } catch { }
+}
+
+function Get-AppSettings {
+    try {
+        $d = Get-AppDataDir; if (-not $d) { return $null }
+        $f = Join-Path $d 'settings.json'
+        if (-not (Test-Path -LiteralPath $f)) { return $null }
+        return (Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json)
+    } catch { return $null }
+}
+
+function Save-AppSettings {
+    param($form)
+    try {
+        $d = Get-AppDataDir; if (-not $d) { return }
+        $f = Join-Path $d 'settings.json'
+        $cur = Get-AppSettings
+        $obj = [ordered]@{}
+        if ($cur) { foreach ($pp in $cur.PSObject.Properties) { $obj[$pp.Name] = $pp.Value } }
+        if ($form.WindowState -eq 'Normal') {
+            $obj['winW'] = [int]$form.Size.Width
+            $obj['winH'] = [int]$form.Size.Height
+            $obj['winX'] = [int]$form.Location.X
+            $obj['winY'] = [int]$form.Location.Y
+        }
+        ($obj | ConvertTo-Json) | Set-Content -LiteralPath $f -Encoding UTF8
+    } catch { }
+}
 
 # ----------------------------------------------------------------------------
 # Helpers
@@ -90,6 +183,55 @@ function ConvertTo-ExtendedPath {
     if ($p.StartsWith('\\?\')) { return $p }
     if ($p.StartsWith('\\'))   { return '\\?\UNC\' + $p.Substring(2) }  # rede
     return '\\?\' + $p                                                  # local
+}
+
+# ----------------------------------------------------------------------------
+# Deteccao do TIPO de reparse point (tag), via FindFirstFileW.
+# Precisamos de distinguir:
+#   - junctions / symlinks  -> IGNORAR (causam loops e dupla contagem)
+#   - placeholders da cloud -> PERCORRER como ficheiros/pastas normais
+#     (OneDrive/Dropbox/etc. marcam TODAS as entradas como reparse points; se
+#      as ignorassemos, o scan de uma pasta sincronizada daria sempre 0).
+# Funciona em Windows PowerShell 5.1 e PowerShell 7+.
+# ----------------------------------------------------------------------------
+if (-not ('FsReparse.Native' -as [type])) {
+    Add-Type -Namespace FsReparse -Name Native -MemberDefinition @'
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public struct WIN32_FIND_DATA {
+    public uint dwFileAttributes;
+    public System.Runtime.InteropServices.ComTypes.FILETIME ftCreationTime;
+    public System.Runtime.InteropServices.ComTypes.FILETIME ftLastAccessTime;
+    public System.Runtime.InteropServices.ComTypes.FILETIME ftLastWriteTime;
+    public uint nFileSizeHigh;
+    public uint nFileSizeLow;
+    public uint dwReserved0;
+    public uint dwReserved1;
+    [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 260)]
+    public string cFileName;
+    [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 14)]
+    public string cAlternateFileName;
+}
+[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+public static extern System.IntPtr FindFirstFileW(string lpFileName, out WIN32_FIND_DATA lpFindFileData);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool FindClose(System.IntPtr hFindFile);
+'@
+}
+
+$script:TagMountPoint = [uint32] 2684354563   # 0xA0000003  IO_REPARSE_TAG_MOUNT_POINT (junction)
+$script:TagSymlink    = [uint32] 2684354572   # 0xA000000C  IO_REPARSE_TAG_SYMLINK
+
+# $ExtendedPath deve ja vir no formato \\?\ . Devolve $true so para junctions/symlinks.
+function Test-IsJunctionOrSymlink {
+    param([string] $ExtendedPath)
+    try {
+        $data = New-Object 'FsReparse.Native+WIN32_FIND_DATA'
+        $h = [FsReparse.Native]::FindFirstFileW($ExtendedPath, [ref] $data)
+        if ($h -eq [System.IntPtr]::Zero -or $h -eq [System.IntPtr] (-1)) { return $false }
+        [void][FsReparse.Native]::FindClose($h)
+        return ($data.dwReserved0 -eq $script:TagMountPoint -or $data.dwReserved0 -eq $script:TagSymlink)
+    }
+    catch { return $false }
 }
 
 # Tamanho legivel
@@ -106,6 +248,18 @@ function Test-Excluded {
     param([string] $name)
     foreach ($pat in $Exclude) { if ($name -like $pat) { return $true } }
     return $false
+}
+
+function Format-Date {
+    param($d)
+    if ($null -eq $d -or $d -eq [datetime]::MinValue) { return '-' }
+    try { return ([datetime]$d).ToLocalTime().ToString('yyyy-MM-dd') } catch { return '-' }
+}
+
+function ConvertTo-HtmlText {
+    param([string] $s)
+    if ($null -eq $s) { return '' }
+    return $s.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;')
 }
 
 # Mapa extensao -> categoria legivel (sem semantica: so classificacao por tipo).
@@ -173,15 +327,39 @@ function Get-ParetoInfo {
 }
 
 # Estado global do scan
-$script:ErrCount   = 0
-$script:Errors     = New-Object System.Collections.Generic.List[string]
-$script:LongPaths  = New-Object System.Collections.Generic.List[object]
-$script:Count      = 0
-$script:LastReport = 0
+$script:ErrCount        = 0
+$script:Errors          = New-Object System.Collections.Generic.List[string]
+$script:DeniedDirs      = New-Object System.Collections.Generic.List[string]   # pastas que nao se conseguiu enumerar
+$script:DeniedItems     = New-Object System.Collections.Generic.List[string]   # ficheiros/entradas sem acesso a metadados
+$script:LongPaths       = New-Object System.Collections.Generic.List[object]
+$script:Count           = 0
+$script:LastReport      = 0
+$script:SkipReparse     = 0   # junctions/symlinks ignorados (nao inclui placeholders da cloud)
+$script:CancelRequested = $false
+$script:Partial         = $false
+$script:ProgForm        = $null
+$script:ProgClosing     = $false
+$script:ProgSw          = $null
+
+# Regista um erro de scan. tag 'enum*' = ao nivel da pasta; 'attr'/'size' = entrada.
+# So os erros de acesso vao para as listas Denied (cobertura); os restantes ficam
+# apenas em $script:Errors (indisponibilidade transitoria, I/O, etc.).
+function Add-ScanError {
+    param([string] $tag, [string] $path, $err)
+    $script:ErrCount++
+    $script:Errors.Add("[$tag] $path :: $($err.Exception.Message)")
+    $ex = $err.Exception
+    $denied = ($ex -is [System.UnauthorizedAccessException] -or
+               $ex.InnerException -is [System.UnauthorizedAccessException] -or
+               $ex.Message -match 'negad|denied|Acesso|Access is denied')
+    if (-not $denied) { return }
+    if ($tag -like 'enum*') { $script:DeniedDirs.Add($path) }
+    else                    { $script:DeniedItems.Add($path) }
+}
 
 # ----------------------------------------------------------------------------
 # Scan recursivo -> devolve um no com tamanho/contagens CUMULATIVOS
-#   Node = { Path; Name; Size; FileCount; DirCount; Children[]; Ext{ext->size} }
+#   Node = { Path; Name; Size; FileCount; DirCount; Children[]; Ext{ext->size}; MaxMtime; Complete }
 # ----------------------------------------------------------------------------
 function Get-FolderNode {
     param([string] $DisplayPath)
@@ -194,41 +372,61 @@ function Get-FolderNode {
         DirCount  = 0
         Children  = (New-Object System.Collections.Generic.List[object])
         Ext       = @{}
+        MaxMtime  = [datetime]::MinValue
+        # $true so se ESTA pasta e toda a subarvore foram lidas por completo.
+        # $false -> Size/FileCount/... sao MINIMOS conhecidos, nao totais.
+        Complete  = $true
     }
     if ([string]::IsNullOrEmpty($node.Name)) { $node.Name = $DisplayPath }
 
+    if ($script:CancelRequested) { $node.Complete = $false; return $node }
+
     $extPath = ConvertTo-ExtendedPath $DisplayPath
     try {
-        $entries = [System.IO.Directory]::EnumerateFileSystemEntries(
+        $enum = [System.IO.Directory]::EnumerateFileSystemEntries(
             $extPath, '*', [System.IO.SearchOption]::TopDirectoryOnly)
     }
     catch {
-        $script:ErrCount++
-        $script:Errors.Add("[enum] $DisplayPath :: $($_.Exception.Message)")
+        # Falha imediata: pasta inacessivel / inexistente -> pasta nao medida.
+        Add-ScanError 'enum-dir' $DisplayPath $_
+        $node.Complete = $false
         return $node
     }
 
-    foreach ($entry in $entries) {
+    # A enumeracao e lazy: uma falha (blip de rede, pasta apagada a meio) pode
+    # surgir DENTRO do foreach, fora do try acima. Este try garante que so se
+    # perde o resto DESTA pasta -- o scan global continua.
+    try {
+      foreach ($entry in $enum) {
+        if ($script:CancelRequested) { break }
+
         $leaf = [System.IO.Path]::GetFileName($entry)
         $childDisplay = $DisplayPath.TrimEnd('\') + '\' + $leaf
 
         $script:Count++
-        if (($script:Count - $script:LastReport) -ge 500) {
+        if (($script:Count - $script:LastReport) -ge 400) {
             $script:LastReport = $script:Count
-            Write-Progress -Activity 'A analisar...' `
-                -Status "$($script:Count) itens | erros: $($script:ErrCount) | $childDisplay"
+            if ($script:ProgForm) { Update-ProgressWindow $childDisplay }
+            else {
+                Write-Progress -Activity 'A analisar...' `
+                    -Status "$($script:Count) itens | erros: $($script:ErrCount) | $childDisplay"
+            }
         }
 
         $isDir = $false
         try {
             $attr  = [System.IO.File]::GetAttributes($entry)
             $isDir = (($attr -band [System.IO.FileAttributes]::Directory) -ne 0)
-            # ignora reparse points (junctions/symlinks) para nao contar em duplicado / loops
-            if (($attr -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+            # Reparse points: so ignoramos junctions/symlinks REAIS (loops / dupla
+            # contagem). Placeholders da cloud (OneDrive etc.) tambem sao reparse
+            # points, mas tem de ser percorridos como ficheiros/pastas normais.
+            if (($attr -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                if (Test-IsJunctionOrSymlink $entry) { $script:SkipReparse++; continue }
+            }
         }
         catch {
-            $script:ErrCount++
-            $script:Errors.Add("[attr] $childDisplay :: $($_.Exception.Message)")
+            Add-ScanError 'attr' $childDisplay $_
+            $node.Complete = $false   # entrada vista mas nao classificada
             continue
         }
 
@@ -239,17 +437,28 @@ function Get-FolderNode {
             $node.Size      += $child.Size
             $node.FileCount += $child.FileCount
             $node.DirCount  += ($child.DirCount + 1)
+            if (-not $child.Complete) { $node.Complete = $false }
+            if ($child.MaxMtime -gt $node.MaxMtime) { $node.MaxMtime = $child.MaxMtime }
             foreach ($k in $child.Ext.Keys) {
                 if ($node.Ext.ContainsKey($k)) { $node.Ext[$k] += $child.Ext[$k] }
                 else { $node.Ext[$k] = $child.Ext[$k] }
             }
+            if ($childDisplay.Length -gt 260) {
+                $script:LongPaths.Add([pscustomobject]@{
+                    Length = $childDisplay.Length; Size = $child.Size; Path = $childDisplay; Type = 'Pasta' })
+            }
         }
         else {
             $len = [int64]0
-            try { $len = ([System.IO.FileInfo] $entry).Length }
+            try {
+                $fi  = [System.IO.FileInfo] $entry
+                $len = $fi.Length
+                $mt  = $fi.LastWriteTimeUtc
+                if ($mt -gt $node.MaxMtime) { $node.MaxMtime = $mt }
+            }
             catch {
-                $script:ErrCount++
-                $script:Errors.Add("[size] $childDisplay :: $($_.Exception.Message)")
+                Add-ScanError 'size' $childDisplay $_
+                $node.Complete = $false   # ficheiro contado mas tamanho desconhecido -> total e minimo
             }
             $node.Size += $len
             $node.FileCount++
@@ -260,11 +469,46 @@ function Get-FolderNode {
 
             if ($childDisplay.Length -gt 260) {
                 $script:LongPaths.Add([pscustomobject]@{
-                    Length = $childDisplay.Length; Size = $len; Path = $childDisplay })
+                    Length = $childDisplay.Length; Size = $len; Path = $childDisplay; Type = 'Ficheiro' })
             }
         }
+      }
+    }
+    catch {
+        # Falha a meio da enumeracao desta pasta -> regista e segue em frente.
+        # Nao sabemos quantas entradas ficaram por ler -> totais sao minimos.
+        Add-ScanError 'enum-iter' $DisplayPath $_
+        $node.Complete = $false
     }
     return $node
+}
+
+# Nº de pastas cujos totais sao MINIMOS (enumeracao incompleta algalgures na subarvore).
+function Get-IncompleteCount {
+    param($root)
+    $c = 0
+    $st = New-Object System.Collections.Generic.Stack[object]
+    $st.Push($root)
+    while ($st.Count -gt 0) {
+        $x = $st.Pop()
+        if (-not $x.Complete) { $c++ }
+        foreach ($k in $x.Children) { $st.Push($k) }
+    }
+    return $c
+}
+
+# Lista plana de TODAS as pastas da arvore, maiores primeiro (iterativo).
+function Get-FlatTop {
+    param($root, [int] $n = 50, [switch] $IncludeRoot)
+    $list  = New-Object System.Collections.Generic.List[object]
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push($root)
+    while ($stack.Count -gt 0) {
+        $x = $stack.Pop()
+        if ($IncludeRoot -or -not [object]::ReferenceEquals($x, $root)) { $list.Add($x) }
+        foreach ($c in $x.Children) { $stack.Push($c) }
+    }
+    return @($list | Sort-Object Size -Descending | Select-Object -First $n)
 }
 
 # ----------------------------------------------------------------------------
@@ -290,8 +534,9 @@ function Show-Children {
         if ($node.Size -gt 0) { $pct = ($c.Size / $node.Size) * 100 }
         $bar = ('#' * [int][math]::Round($pct / 5)).PadRight(20)
         $tag = if ($Numbered) { ('[{0,2}] ' -f $i) } else { '' }
-        Write-Host ('{0}{1}{2,10}  {3,6:N1}%  |{4}|  {5}  ({6} fich.)' -f `
-            $pad, $tag, (Format-Size $c.Size), $pct, $bar, $c.Name, $c.FileCount)
+        $szc = $(if ($c.Complete) { '' } else { '>=' }) + (Format-Size $c.Size)
+        Write-Host ('{0}{1}{2,12}  {3,6:N1}%  |{4}|  {5}  ({6} fich., mod. {7})' -f `
+            $pad, $tag, $szc, $pct, $bar, $c.Name, $c.FileCount, (Format-Date $c.MaxMtime))
         Show-Ext -node $c -pad ($indent * 2)
     }
     $rest = $sorted.Count - $shown.Count
@@ -320,6 +565,25 @@ function Show-Report {
     }
 }
 
+# Top de TODA a arvore (lista plana), independente da profundidade.
+function Show-FlatTop {
+    param($root, [int] $n = 50)
+    $all = Get-FlatTop -root $root -n $n
+    Write-Host ''
+    Write-Host "--- Top $n pastas de TODA a arvore (por tamanho) ---" -ForegroundColor Cyan
+    $rank = 0
+    foreach ($x in $all) {
+        $rank++
+        $pct = 0.0
+        if ($root.Size -gt 0) { $pct = ($x.Size / $root.Size) * 100 }
+        $cat = ''
+        if ($x.Ext.Count -gt 0) { $cat = (Get-CategoryText -node $x -top 1) }
+        $szx = $(if ($x.Complete) { '' } else { '>=' }) + (Format-Size $x.Size)
+        Write-Host ('{0,3}. {1,12}  {2,5:N1}%  fich+rec.{3}  {4,-16}  {5}' -f `
+            $rank, $szx, $pct, (Format-Date $x.MaxMtime), $cat, $x.Path)
+    }
+}
+
 # Modo interativo: afundas numa pasta so quando escolheres
 function Start-Interactive {
     param($root, [int]$top)
@@ -328,15 +592,15 @@ function Start-Interactive {
     while ($true) {
         Write-Host ''
         Write-Host ('=== ' + $current.Path + ' ===') -ForegroundColor Cyan
-        Write-Host ('Total: {0}  |  {1} ficheiros  |  {2} subpastas' -f `
-            (Format-Size $current.Size), $current.FileCount, $current.DirCount) -ForegroundColor Yellow
+        Write-Host ('Total: {0}  |  {1} ficheiros  |  {2} subpastas  |  mod. {3}' -f `
+            (Format-Size $current.Size), $current.FileCount, $current.DirCount, (Format-Date $current.MaxMtime)) -ForegroundColor Yellow
         if ($current.Children.Count -eq 0) {
             Write-Host '(sem subpastas)' -ForegroundColor DarkGray
         } else {
             $shown = Show-Children -node $current -top $top -Numbered
         }
         Write-Host ''
-        Write-Host 'Comandos: [n] afundar na pasta n | [u] subir | [e] ligar/desligar tipos | [q] sair' -ForegroundColor DarkGray
+        Write-Host 'Comandos: [n] afundar | [u] subir | [e] tipos on/off | [t] top global | [q] sair' -ForegroundColor DarkGray
         $ans = (Read-Host 'Escolha').Trim().ToLower()
 
         if     ($ans -eq 'q') { break }
@@ -346,6 +610,10 @@ function Start-Interactive {
         elseif ($ans -eq 'e') {
             $script:ShowExtensions = -not $script:ShowExtensions
             Set-Variable -Name ShowExtensions -Value $script:ShowExtensions -Scope 1 -ErrorAction SilentlyContinue
+        }
+        elseif ($ans -eq 't') {
+            $n = if ($FlatTop -gt 0) { $FlatTop } else { 50 }
+            Show-FlatTop -root $root -n $n
         }
         elseif ($ans -match '^\d+$') {
             $idx = [int]$ans
@@ -359,73 +627,451 @@ function Start-Interactive {
     }
 }
 
-# Achata a arvore e exporta para CSV (uma linha por pasta, maiores primeiro).
-# Iterativo (sem recursao) para aguentar arvores muito profundas.
-function Export-TreeCsv {
-    param($node, [string] $CsvPath)
+# Achata a arvore numa lista de pastas (iterativo, sem recursao).
+# Depth = nivel relativo a raiz (raiz = 0). NewestFile* = data do ficheiro mais
+# recente da subarvore (NAO e "a pasta foi mexida agora").
+function Get-FlatFolderList {
+    param($root)
+    $rootPath = $root.Path.TrimEnd('\')
     $rows  = New-Object System.Collections.Generic.List[object]
     $stack = New-Object System.Collections.Generic.Stack[object]
-    $stack.Push($node)
+    $stack.Push($root)
     while ($stack.Count -gt 0) {
         $n = $stack.Pop()
+        $cat = ''
+        if ($n.Ext.Count -gt 0) { $cat = ((Get-CategoryBreakdown $n | Select-Object -First 1).Key) }
+        $p = $n.Path.TrimEnd('\')
+        $rel = if ($p.StartsWith($rootPath)) { $p.Substring($rootPath.Length) } else { $p }
+        $depth = @($rel -split '[\\/]' | Where-Object { $_ }).Count
         $rows.Add([pscustomobject]@{
-            Path = $n.Path; SizeBytes = $n.Size; Size = (Format-Size $n.Size)
-            Files = $n.FileCount; SubDirs = $n.DirCount })
+            Path = $n.Path; Name = $n.Name
+            ParentPath = [System.IO.Path]::GetDirectoryName($p); Depth = $depth
+            SizeBytes = [int64]$n.Size; Size = (Format-Size $n.Size)
+            Files = $n.FileCount; SubDirs = $n.DirCount
+            NewestFileLocal = (Format-Date $n.MaxMtime)
+            NewestFileUtc = $(if ($n.MaxMtime -eq [datetime]::MinValue) { '' } else { ([datetime]$n.MaxMtime).ToString('o') })
+            TopCategory = $cat
+            # $false -> os numeros desta linha sao MINIMOS (SizeBytes = "pelo menos")
+            Complete = [bool]$n.Complete
+        })
         foreach ($c in $n.Children) { $stack.Push($c) }
     }
-    $rows | Sort-Object SizeBytes -Descending |
+    return $rows
+}
+
+function Export-TreeCsv {
+    param($node, [string] $CsvPath)
+    Get-FlatFolderList -root $node |
+        Sort-Object SizeBytes -Descending |
+        Select-Object Path, Name, Depth, ParentPath, SizeBytes, Size, Files, SubDirs, NewestFileLocal, NewestFileUtc, TopCategory, Complete |
         Export-Csv -LiteralPath $CsvPath -NoTypeInformation -Encoding UTF8
 }
 
-# Reconstroi a grelha a partir do no atual (instantaneo: a arvore ja esta em
-# memoria). Funcao de TOPO + estado em $script: -> chamavel dos event handlers
-# do WinForms sem os problemas de scope das funcoes aninhadas.
+function Export-Snapshot {
+    param($root, [string] $SnapPath)
+    $folders = Get-FlatFolderList -root $root | ForEach-Object {
+        [pscustomobject]@{ p = $_.Path; b = $_.SizeBytes; f = $_.Files; d = $_.SubDirs; m = $_.NewestFileUtc; c = $_.Complete }
+    }
+    $snap = [pscustomobject]@{
+        meta = [pscustomobject]@{
+            path       = $root.Path
+            dateUtc    = (Get-Date).ToUniversalTime().ToString('o')
+            version    = $script:AppVersion
+            totalBytes = [int64]$root.Size
+            files      = $root.FileCount
+            subDirs    = $root.DirCount
+            partial    = [bool]$script:Partial
+        }
+        folders = @($folders)
+    }
+    ($snap | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $SnapPath -Encoding UTF8
+}
+
+function Format-Delta {
+    param([int64] $b)
+    $sign = if ($b -ge 0) { '+' } else { '-' }
+    return "$sign$(Format-Size ([math]::Abs([int64]$b)))"
+}
+
+function Compare-Snapshot {
+    param($root, [string] $PrevPath)
+    if (-not (Test-Path -LiteralPath $PrevPath)) {
+        Write-Warning "Snapshot para comparar nao encontrado: $PrevPath"; return $null
+    }
+    try {
+        $prev = Get-Content -LiteralPath $PrevPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        Write-Warning "Nao consegui ler o snapshot '$PrevPath': $($_.Exception.Message)"; return $null
+    }
+
+    $prevMap = @{}
+    foreach ($x in $prev.folders) { $prevMap[[string]$x.p] = [int64]$x.b }
+    $curMap = @{}
+    foreach ($x in (Get-FlatFolderList -root $root)) { $curMap[[string]$x.Path] = [int64]$x.SizeBytes }
+
+    $changed = New-Object System.Collections.Generic.List[object]
+    $added   = New-Object System.Collections.Generic.List[object]
+    foreach ($k in $curMap.Keys) {
+        if ($prevMap.ContainsKey($k)) {
+            $delta = $curMap[$k] - $prevMap[$k]
+            if ($delta -ne 0) {
+                $changed.Add([pscustomobject]@{ Path = $k; Prev = $prevMap[$k]; Cur = $curMap[$k]; Delta = $delta })
+            }
+        } else {
+            $added.Add([pscustomobject]@{ Path = $k; Prev = [int64]0; Cur = $curMap[$k]; Delta = $curMap[$k] })
+        }
+    }
+    $removed = New-Object System.Collections.Generic.List[object]
+    foreach ($k in $prevMap.Keys) {
+        if (-not $curMap.ContainsKey($k)) {
+            $removed.Add([pscustomobject]@{ Path = $k; Prev = $prevMap[$k]; Cur = [int64]0; Delta = - $prevMap[$k] })
+        }
+    }
+
+    return [pscustomobject]@{
+        PrevPath   = $PrevPath
+        PrevDate   = $prev.meta.dateUtc
+        PrevTotal  = [int64]$prev.meta.totalBytes
+        CurTotal   = [int64]$root.Size
+        Growers    = @($changed | Where-Object { $_.Delta -gt 0 } | Sort-Object Delta -Descending | Select-Object -First 20)
+        Shrinkers  = @($changed | Where-Object { $_.Delta -lt 0 } | Sort-Object Delta | Select-Object -First 20)
+        NewFolders = @($added   | Sort-Object Delta -Descending | Select-Object -First 20)
+        RemFolders = @($removed | Sort-Object Delta | Select-Object -First 20)
+    }
+}
+
+function Show-Compare {
+    param($cmp)
+    if (-not $cmp) { return }
+    Write-Host ''
+    Write-Host '--- EVOLUCAO desde o snapshot anterior ---' -ForegroundColor Cyan
+    Write-Host ("  Snapshot base : $($cmp.PrevPath)  ($($cmp.PrevDate))")
+    Write-Host ("  Total antes   : $(Format-Size $cmp.PrevTotal)")
+    Write-Host ("  Total agora   : $(Format-Size $cmp.CurTotal)")
+    Write-Host ("  Variacao      : $(Format-Delta ($cmp.CurTotal - $cmp.PrevTotal))") -ForegroundColor Yellow
+    if ($cmp.Growers.Count -gt 0) {
+        Write-Host '  Cresceram mais:' -ForegroundColor Green
+        foreach ($g in ($cmp.Growers | Select-Object -First 10)) { Write-Host ('    {0,12}  {1}' -f (Format-Delta $g.Delta), $g.Path) }
+    }
+    if ($cmp.Shrinkers.Count -gt 0) {
+        Write-Host '  Encolheram mais:' -ForegroundColor DarkGreen
+        foreach ($s in ($cmp.Shrinkers | Select-Object -First 10)) { Write-Host ('    {0,12}  {1}' -f (Format-Delta $s.Delta), $s.Path) }
+    }
+    if ($cmp.NewFolders.Count -gt 0) {
+        Write-Host '  Pastas novas:' -ForegroundColor Green
+        foreach ($n in ($cmp.NewFolders | Select-Object -First 10)) { Write-Host ('    {0,12}  {1}' -f (Format-Size $n.Cur), $n.Path) }
+    }
+    if ($cmp.RemFolders.Count -gt 0) {
+        Write-Host '  Pastas removidas:' -ForegroundColor DarkGray
+        foreach ($n in ($cmp.RemFolders | Select-Object -First 10)) { Write-Host ('    {0,12}  {1}' -f (Format-Size $n.Prev), $n.Path) }
+    }
+}
+
+function Export-HtmlReport {
+    param($root, [string] $HtmlPath, [double] $Elapsed, $cmp, [int] $topN = 25)
+
+    $sb = New-Object System.Text.StringBuilder
+    $add = { param($s) [void]$sb.AppendLine($s) }
+
+    $css = @'
+<style>
+ body{font-family:Segoe UI,Arial,sans-serif;margin:24px;color:#1c1c1c;background:#fafafa}
+ h1{font-size:20px;margin:0 0 4px} h2{font-size:15px;margin:24px 0 8px;border-bottom:1px solid #ddd;padding-bottom:4px}
+ h3{font-size:13px;margin:14px 0 4px}
+ .muted{color:#666;font-size:12px} .cards{display:flex;flex-wrap:wrap;gap:12px;margin:12px 0}
+ .card{background:#fff;border:1px solid #e2e2e2;border-radius:8px;padding:10px 14px;min-width:120px}
+ .card .v{font-size:18px;font-weight:600} .card .l{font-size:11px;color:#777;text-transform:uppercase;letter-spacing:.04em}
+ table{border-collapse:collapse;width:100%;background:#fff;font-size:13px;margin-bottom:8px}
+ th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #eee} th{background:#f0f0f0}
+ td.num{text-align:right;white-space:nowrap} .bar{background:#e8e8e8;border-radius:3px;height:12px;overflow:hidden}
+ .bar>span{display:block;height:12px;background:#4a7fb5} .pos{color:#1a7f37} .neg{color:#b53a3a}
+ .path{font-family:Consolas,monospace;font-size:12px;word-break:break-all}
+</style>
+'@
+
+    & $add '<!doctype html><html lang="pt"><head><meta charset="utf-8">'
+    & $add ("<title>Espaco - " + (ConvertTo-HtmlText $root.Path) + "</title>")
+    & $add $css
+    & $add '</head><body>'
+    & $add "<h1>Relatorio de ocupacao de espaco</h1>"
+    & $add ("<div class='muted'>" + (ConvertTo-HtmlText $root.Path) + " &mdash; " +
+            (Get-Date).ToString('yyyy-MM-dd HH:mm') + " &mdash; v$($script:AppVersion)" +
+            $(if ($script:Partial) { " &mdash; <b>SCAN PARCIAL (cancelado)</b>" } else { "" }) + "</div>")
+
+    & $add "<div class='cards'>"
+    & $add ("<div class='card'><div class='v'>" + $(if (-not $root.Complete) { '&ge; ' }) + (Format-Size $root.Size) + "</div><div class='l'>Total</div></div>")
+    & $add ("<div class='card'><div class='v'>" + ('{0:N0}' -f $root.FileCount) + "</div><div class='l'>Ficheiros</div></div>")
+    & $add ("<div class='card'><div class='v'>" + ('{0:N0}' -f $root.DirCount) + "</div><div class='l'>Subpastas</div></div>")
+    & $add ("<div class='card'><div class='v'>" + (@($script:DeniedDirs | Select-Object -Unique).Count) + "</div><div class='l'>Pastas s/ acesso</div></div>")
+    & $add ("<div class='card'><div class='v'>" + ('{0:N1}s' -f $Elapsed) + "</div><div class='l'>Tempo</div></div>")
+    & $add "</div>"
+
+    $incompleteN = Get-IncompleteCount -root $root
+    if ($incompleteN -gt 0) {
+        & $add ("<p style='background:#fff4d6;border:1px solid #e6c34d;border-radius:6px;padding:8px 12px'>" +
+                "<b>Cobertura parcial.</b> $incompleteN pasta(s) nao foram lidas por completo (sem acesso ou " +
+                "falha de enumeracao). Nessas pastas &mdash; e em todas as suas ascendentes, incluindo o Total &mdash; " +
+                "os valores sao <b>minimos</b> (&ge;), nao totais. Linhas afetadas marcadas com &ge;.</p>")
+    }
+
+    $p = Get-ParetoInfo -node $root -fraction 0.8
+    if ($p.Count -gt 0) {
+        & $add ("<p><b>Pareto:</b> as " + $p.Count + " maiores pastas de 1&ordm; nivel = " + $p.Share + "% do espaco.</p>")
+    }
+
+    & $add "<h2>Top $topN pastas (toda a arvore)</h2>"
+    & $add "<table><tr><th>#</th><th>Pasta</th><th class='num'>Tamanho</th><th class='num'>%</th><th></th><th class='num'>Ficheiros</th><th>Modif.</th><th>Conteudo</th></tr>"
+    $rank = 0
+    foreach ($x in (Get-FlatTop -root $root -n $topN)) {
+        $rank++
+        $pct = 0.0
+        if ($root.Size -gt 0) { $pct = [math]::Round(($x.Size / $root.Size) * 100, 1) }
+        $cat = ''
+        if ($x.Ext.Count -gt 0) { $cat = Get-CategoryText -node $x -top 2 }
+        $sz = $(if ($x.Complete) { '' } else { '&ge; ' }) + (Format-Size $x.Size)
+        & $add ("<tr><td>$rank</td><td class='path'>" + (ConvertTo-HtmlText $x.Path) + "</td>" +
+                "<td class='num'>$sz</td><td class='num'>$pct%</td>" +
+                "<td style='width:110px'><div class='bar'><span style='width:$([math]::Min(100,$pct))%'></span></div></td>" +
+                "<td class='num'>" + ('{0:N0}' -f $x.FileCount) + "</td><td>" + (Format-Date $x.MaxMtime) + "</td>" +
+                "<td>" + (ConvertTo-HtmlText $cat) + "</td></tr>")
+    }
+    & $add "</table>"
+
+    & $add "<h2>Conteudo por categoria (raiz)</h2>"
+    & $add "<table><tr><th>Categoria</th><th class='num'>Tamanho</th><th class='num'>%</th><th></th></tr>"
+    foreach ($e in (Get-CategoryBreakdown $root)) {
+        $pct = 0.0
+        if ($root.Size -gt 0) { $pct = [math]::Round(($e.Value / $root.Size) * 100, 1) }
+        & $add ("<tr><td>" + (ConvertTo-HtmlText $e.Key) + "</td><td class='num'>" + (Format-Size $e.Value) + "</td>" +
+                "<td class='num'>$pct%</td><td style='width:200px'><div class='bar'><span style='width:$([math]::Min(100,$pct))%'></span></div></td></tr>")
+    }
+    & $add "</table>"
+
+    if ($cmp) {
+        & $add "<h2>Evolucao desde o snapshot anterior</h2>"
+        & $add ("<p class='muted'>Base: " + (ConvertTo-HtmlText $cmp.PrevPath) + " (" + (ConvertTo-HtmlText ([string]$cmp.PrevDate)) + ")</p>")
+        $dTot = $cmp.CurTotal - $cmp.PrevTotal
+        $cls = if ($dTot -ge 0) { 'pos' } else { 'neg' }
+        & $add ("<p>Total: " + (Format-Size $cmp.PrevTotal) + " &rarr; " + (Format-Size $cmp.CurTotal) +
+                " (<span class='$cls'>" + (Format-Delta $dTot) + "</span>)</p>")
+        foreach ($sec in @(
+                @{ t = 'Cresceram mais'; rows = $cmp.Growers },
+                @{ t = 'Encolheram mais'; rows = $cmp.Shrinkers },
+                @{ t = 'Pastas novas'; rows = $cmp.NewFolders },
+                @{ t = 'Pastas removidas'; rows = $cmp.RemFolders })) {
+            if ($sec.rows.Count -eq 0) { continue }
+            & $add ("<h3>" + $sec.t + "</h3>")
+            & $add "<table><tr><th>Pasta</th><th class='num'>Antes</th><th class='num'>Agora</th><th class='num'>Variacao</th></tr>"
+            foreach ($r in $sec.rows) {
+                $c2 = if ($r.Delta -ge 0) { 'pos' } else { 'neg' }
+                & $add ("<tr><td class='path'>" + (ConvertTo-HtmlText $r.Path) + "</td><td class='num'>" + (Format-Size $r.Prev) +
+                        "</td><td class='num'>" + (Format-Size $r.Cur) + "</td><td class='num $c2'>" + (Format-Delta $r.Delta) + "</td></tr>")
+            }
+            & $add "</table>"
+        }
+    }
+
+    $ddirs  = @($script:DeniedDirs  | Select-Object -Unique)
+    $ditems = @($script:DeniedItems | Select-Object -Unique)
+    if ($ddirs.Count -gt 0 -or $ditems.Count -gt 0) {
+        & $add "<h2>Nao medido (sem acesso) &mdash; $($ddirs.Count) pasta(s), $($ditems.Count) item(ns)</h2>"
+        & $add "<p class='muted'>O espaco destas pastas NAO entra nos totais. Pede acesso antes de decidir a reorganizacao.</p>"
+        if ($ddirs.Count -gt 0) {
+            & $add "<ul class='path'>"
+            foreach ($d in ($ddirs | Select-Object -First 200)) { & $add ("<li>" + (ConvertTo-HtmlText $d) + "</li>") }
+            & $add "</ul>"
+        }
+    }
+
+    if ($script:LongPaths.Count -gt 0) {
+        & $add "<h2>Caminhos &gt; 260 caracteres &mdash; $($script:LongPaths.Count)</h2>"
+        & $add "<table><tr><th>Tipo</th><th class='num'>Tamanho</th><th class='num'>Chars</th><th>Caminho</th></tr>"
+        foreach ($l in ($script:LongPaths | Sort-Object Size -Descending | Select-Object -First 50)) {
+            & $add ("<tr><td>" + (ConvertTo-HtmlText ([string]$l.Type)) + "</td><td class='num'>" + (Format-Size $l.Size) +
+                    "</td><td class='num'>" + $l.Length + "</td><td class='path'>" + (ConvertTo-HtmlText $l.Path) + "</td></tr>")
+        }
+        & $add "</table>"
+    }
+
+    & $add '</body></html>'
+    [System.IO.File]::WriteAllText($HtmlPath, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+# ----------------------------------------------------------------------------
+# Janela de progresso durante o scan (modeless + DoEvents). Botao Cancelar.
+# ----------------------------------------------------------------------------
+function Show-ProgressWindow {
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+
+        $f = New-Object System.Windows.Forms.Form
+        $f.Text = 'A analisar...'
+        $f.Size = New-Object System.Drawing.Size(480, 210)
+        $f.StartPosition = 'CenterScreen'
+        $f.FormBorderStyle = 'FixedDialog'
+        $f.MaximizeBox = $false
+        $f.MinimizeBox = $false
+
+        $script:ProgLblPath = New-Object System.Windows.Forms.Label
+        $script:ProgLblPath.Location = New-Object System.Drawing.Point(14, 14)
+        $script:ProgLblPath.Size = New-Object System.Drawing.Size(440, 60)
+        $script:ProgLblPath.Text = 'A iniciar...'
+
+        $script:ProgLblStats = New-Object System.Windows.Forms.Label
+        $script:ProgLblStats.Location = New-Object System.Drawing.Point(14, 78)
+        $script:ProgLblStats.Size = New-Object System.Drawing.Size(440, 20)
+        $script:ProgLblStats.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+
+        $bar = New-Object System.Windows.Forms.ProgressBar
+        $bar.Location = New-Object System.Drawing.Point(14, 104)
+        $bar.Size = New-Object System.Drawing.Size(440, 18)
+        $bar.Style = 'Marquee'
+        $bar.MarqueeAnimationSpeed = 40
+
+        $btn = New-Object System.Windows.Forms.Button
+        $btn.Text = 'Cancelar'
+        $btn.Size = New-Object System.Drawing.Size(100, 30)
+        $btn.Location = New-Object System.Drawing.Point(354, 132)
+        $btn.Add_Click({
+            $script:CancelRequested = $true
+            $btn.Enabled = $false
+            $btn.Text = 'A cancelar...'
+        })
+
+        $f.Controls.AddRange(@($script:ProgLblPath, $script:ProgLblStats, $bar, $btn))
+        $f.Add_FormClosing({ if (-not $script:ProgClosing) { $script:CancelRequested = $true } })
+
+        $script:ProgClosing = $false
+        $script:ProgForm = $f
+        $script:ProgSw = [System.Diagnostics.Stopwatch]::StartNew()
+        $f.Show(); $f.Refresh()
+        [System.Windows.Forms.Application]::DoEvents()
+        return $true
+    }
+    catch {
+        $script:ProgForm = $null
+        return $false
+    }
+}
+
+function Update-ProgressWindow {
+    param([string] $currentPath)
+    if (-not $script:ProgForm) { return }
+    try {
+        $disp = $currentPath
+        if ($disp.Length -gt 78) { $disp = '...' + $disp.Substring($disp.Length - 75) }
+        $script:ProgLblPath.Text = $disp
+        $secs = if ($script:ProgSw) { $script:ProgSw.Elapsed.TotalSeconds } else { 0 }
+        $script:ProgLblStats.Text = ('{0:N0} itens   |   {1} erros   |   {2:N0}s' -f $script:Count, $script:ErrCount, $secs)
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    catch { }
+}
+
+function Close-ProgressWindow {
+    if (-not $script:ProgForm) { return }
+    $script:ProgClosing = $true
+    try { $script:ProgForm.Close(); $script:ProgForm.Dispose() } catch { }
+    $script:ProgForm = $null
+}
+
+# ----------------------------------------------------------------------------
+# Janela de navegacao: helpers de acao + reconstrucao da grelha.
+# Funcoes de TOPO + estado em $script: -> chamaveis dos event handlers WinForms.
+# ----------------------------------------------------------------------------
+function Invoke-OpenInExplorer {
+    param([string] $p)
+    try { Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$p`"" } catch { }
+}
+
+function Copy-PathToClipboard {
+    param([string] $p)
+    try { Set-Clipboard -Value $p } catch {
+        try { Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::SetText($p) } catch { }
+    }
+}
+
+function Get-GuiSelectedNode {
+    if (-not $script:GuiGrid.CurrentRow) { return $null }
+    try { return $script:GuiNodes[[int]$script:GuiGrid.CurrentRow.Cells['Idx'].Value] } catch { return $null }
+}
+
 function Update-GuiGrid {
     $node = $script:GuiCurrent
-    $script:GuiNodes = @($node.Children | Sort-Object Size -Descending)
+
+    if ($script:GuiFlat) {
+        $script:GuiNodes = Get-FlatTop -root $script:GuiRoot -n $script:GuiFlatN
+    } else {
+        $script:GuiNodes = @($node.Children | Sort-Object Size -Descending)
+    }
 
     $dt = New-Object System.Data.DataTable
-    [void]$dt.Columns.Add('Nome', [string])
+    [void]$dt.Columns.Add($(if ($script:GuiFlat) { 'Caminho' } else { 'Nome' }), [string])
     [void]$dt.Columns.Add('Tamanho', [string])
+    [void]$dt.Columns.Add('Bytes', [int64])
     [void]$dt.Columns.Add('%', [double])
     [void]$dt.Columns.Add('Ficheiros', [int])
     [void]$dt.Columns.Add('Subpastas', [int])
+    [void]$dt.Columns.Add('Fich. recente', [string])
     [void]$dt.Columns.Add('Conteudo', [string])
     [void]$dt.Columns.Add('Idx', [int])
 
+    $refTotal = if ($script:GuiFlat) { $script:GuiRoot.Size } else { $node.Size }
     $i = 0
     foreach ($c in $script:GuiNodes) {
         $pct = 0.0
-        if ($node.Size -gt 0) { $pct = [math]::Round(($c.Size / $node.Size) * 100, 1) }
+        if ($refTotal -gt 0) { $pct = [math]::Round(($c.Size / $refTotal) * 100, 1) }
         $conteudo = ''
         if ($c.Ext.Count -gt 0) { $conteudo = Get-CategoryText -node $c -top 3 }
-        [void]$dt.Rows.Add($c.Name, (Format-Size $c.Size), $pct, $c.FileCount, $c.DirCount, $conteudo, $i)
+        $label = if ($script:GuiFlat) { $c.Path } else { $c.Name }
+        $szg = $(if ($c.Complete) { '' } else { [char]0x2265 + ' ' }) + (Format-Size $c.Size)
+        [void]$dt.Rows.Add($label, $szg, [int64]$c.Size, $pct, $c.FileCount, $c.DirCount, (Format-Date $c.MaxMtime), $conteudo, $i)
         $i++
     }
 
     $script:GuiGrid.DataSource = $dt
     if ($script:GuiGrid.Columns['Idx'])      { $script:GuiGrid.Columns['Idx'].Visible = $false }
+    if ($script:GuiGrid.Columns['Bytes'])    { $script:GuiGrid.Columns['Bytes'].Visible = $false }
     if ($script:GuiGrid.Columns['Nome'])     { $script:GuiGrid.Columns['Nome'].FillWeight = 220 }
-    if ($script:GuiGrid.Columns['Conteudo']) { $script:GuiGrid.Columns['Conteudo'].FillWeight = 260 }
+    if ($script:GuiGrid.Columns['Caminho'])  { $script:GuiGrid.Columns['Caminho'].FillWeight = 420 }
+    if ($script:GuiGrid.Columns['Conteudo']) { $script:GuiGrid.Columns['Conteudo'].FillWeight = 240 }
+    # "Tamanho" e texto formatado -> ordenacao gerida a mao (por 'Bytes') no
+    # handler ColumnHeaderMouseClick, senao ordenava alfabeticamente.
+    if ($script:GuiGrid.Columns['Tamanho']) {
+        $script:GuiGrid.Columns['Tamanho'].SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::Programmatic
+        $script:GuiGrid.Columns['Tamanho'].HeaderCell.SortGlyphDirection = 'None'
+    }
+    # cada pasta comeca sem filtro
+    if ($script:GuiFilterBox -and $script:GuiFilterBox.Text -ne '') { $script:GuiFilterBox.Text = '' }
 
-    $p = Get-ParetoInfo -node $node -fraction 0.8
-    $pareto = ''
-    if ($node.Children.Count -gt 1) { $pareto = ('   —   Pareto: {0} maiores = {1}% do espaco' -f $p.Count, $p.Share) }
-    $script:GuiLbl.Text = ('{0}    —    Total: {1}  |  {2} fich.  |  {3} subpastas{4}' -f `
-        $node.Path, (Format-Size $node.Size), $node.FileCount, $node.DirCount, $pareto)
-    $script:GuiBtnUp.Enabled = ($script:GuiStack.Count -gt 0)
+    if ($script:GuiFlat) {
+        $script:GuiLbl.Text = ('TOP {0} pastas de TODA a arvore    (raiz: {1}  |  {2})' -f `
+            $script:GuiFlatN, $script:GuiRoot.Path, (Format-Size $script:GuiRoot.Size))
+        $script:GuiBtnUp.Enabled = $false
+    } else {
+        $p = Get-ParetoInfo -node $node -fraction 0.8
+        $pareto = ''
+        if ($node.Children.Count -gt 1) { $pareto = ('   -   Pareto: {0} maiores = {1}% do espaco' -f $p.Count, $p.Share) }
+        $script:GuiLbl.Text = ('{0}    -    Total: {1}  |  {2} fich.  |  {3} subpastas  |  mod. {4}{5}' -f `
+            $node.Path, (Format-Size $node.Size), $node.FileCount, $node.DirCount, (Format-Date $node.MaxMtime), $pareto)
+        $script:GuiBtnUp.Enabled = ($script:GuiStack.Count -gt 0)
+    }
 }
 
-# Entra no no correspondente a uma linha da grelha (via coluna Idx -> robusto a ordenacao).
+# Entra no no de uma linha (via coluna Idx -> robusto a reordenacao pelo utilizador).
 function Enter-GuiRow {
     param([int] $rowIndex)
     if ($rowIndex -lt 0) { return }
     $idx = [int]$script:GuiGrid.Rows[$rowIndex].Cells['Idx'].Value
     $target = $script:GuiNodes[$idx]
+    if ($script:GuiFlat) { Invoke-OpenInExplorer $target.Path; return }
     if ($target.Children.Count -gt 0) {
         $script:GuiStack.Push($script:GuiCurrent)
         $script:GuiCurrent = $target
         Update-GuiGrid
+    } else {
+        Invoke-OpenInExplorer $target.Path
     }
 }
 
@@ -439,53 +1085,59 @@ function Select-FolderGui {
         Add-Type -AssemblyName System.Windows.Forms
         Add-Type -AssemblyName System.Drawing
 
+        $recent = Get-RecentPaths
+
         $f = New-Object System.Windows.Forms.Form
-        $f.Text = 'Folder Size Analyzer — escolher pasta'
-        $f.Size = New-Object System.Drawing.Size(620, 175)
+        $f.Text = 'Folder Size Analyzer - escolher pasta'
+        $f.Size = New-Object System.Drawing.Size(640, 185)
         $f.StartPosition = 'CenterScreen'
         $f.FormBorderStyle = 'FixedDialog'
         $f.MaximizeBox = $false
         $f.MinimizeBox = $false
 
         $lab = New-Object System.Windows.Forms.Label
-        $lab.Text = 'Pasta ou share de rede a analisar (podes colar um caminho \\servidor\share):'
+        $lab.Text = 'Pasta ou share a analisar (cola \\servidor\share, ou escolhe do historico):'
         $lab.Location = New-Object System.Drawing.Point(12, 15)
-        $lab.Size = New-Object System.Drawing.Size(590, 20)
+        $lab.Size = New-Object System.Drawing.Size(610, 20)
 
-        $tb = New-Object System.Windows.Forms.TextBox
-        $tb.Location = New-Object System.Drawing.Point(12, 42)
-        $tb.Size = New-Object System.Drawing.Size(480, 24)
+        $cb = New-Object System.Windows.Forms.ComboBox
+        $cb.Location = New-Object System.Drawing.Point(12, 42)
+        $cb.Size = New-Object System.Drawing.Size(500, 24)
+        $cb.DropDownStyle = 'DropDown'
+        $cb.AutoCompleteMode = 'SuggestAppend'
+        $cb.AutoCompleteSource = 'ListItems'
+        foreach ($r in $recent) { [void]$cb.Items.Add($r) }
+        if ($cb.Items.Count -gt 0) { $cb.SelectedIndex = 0 }
 
         $browse = New-Object System.Windows.Forms.Button
         $browse.Text = 'Procurar...'
-        $browse.Location = New-Object System.Drawing.Point(500, 40)
+        $browse.Location = New-Object System.Drawing.Point(520, 40)
         $browse.Size = New-Object System.Drawing.Size(95, 26)
-        # Nota: so mutamos o objeto $tb (referencia capturada) -> seguro no handler.
         $browse.Add_Click({
             $d = New-Object System.Windows.Forms.FolderBrowserDialog
             $d.Description = 'Escolhe a pasta, ou navega ate Rede -> servidor -> share'
             $d.ShowNewFolderButton = $false
-            if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $tb.Text = $d.SelectedPath }
+            if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $cb.Text = $d.SelectedPath }
         })
 
         $ok = New-Object System.Windows.Forms.Button
         $ok.Text = 'Analisar'
-        $ok.Location = New-Object System.Drawing.Point(400, 92)
+        $ok.Location = New-Object System.Drawing.Point(420, 100)
         $ok.Size = New-Object System.Drawing.Size(95, 28)
         $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
 
         $cancel = New-Object System.Windows.Forms.Button
         $cancel.Text = 'Cancelar'
-        $cancel.Location = New-Object System.Drawing.Point(500, 92)
+        $cancel.Location = New-Object System.Drawing.Point(520, 100)
         $cancel.Size = New-Object System.Drawing.Size(95, 28)
         $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
 
-        $f.Controls.AddRange(@($lab, $tb, $browse, $ok, $cancel))
+        $f.Controls.AddRange(@($lab, $cb, $browse, $ok, $cancel))
         $f.AcceptButton = $ok
         $f.CancelButton = $cancel
 
-        if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK -and $tb.Text.Trim()) {
-            return $tb.Text.Trim()
+        if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK -and $cb.Text.Trim()) {
+            return $cb.Text.Trim()
         }
         return $null
     }
@@ -502,26 +1154,54 @@ function Select-FolderGui {
 function Show-Gui {
     param($root)
 
-    # Toda a construcao da janela protegida: numa maquina sem subsistema grafico
-    # (ex.: Server Core) qualquer passo pode falhar -> cai para o modo consola.
+    # Construcao protegida: numa maquina sem subsistema grafico (Server Core)
+    # qualquer passo pode falhar -> cai para o modo consola.
     try {
         Add-Type -AssemblyName System.Windows.Forms
         Add-Type -AssemblyName System.Drawing
 
+        $script:GuiRoot    = $root
         $script:GuiCurrent = $root
         $script:GuiStack   = New-Object System.Collections.Generic.Stack[object]
         $script:GuiNodes   = @()
+        $script:GuiFlat    = $false
+        $script:GuiFlatN   = $(if ($FlatTop -gt 0) { $FlatTop } else { 50 })
 
         $form = New-Object System.Windows.Forms.Form
         $form.Text = 'Folder Size Analyzer'
         $form.Size = New-Object System.Drawing.Size(1120, 700)
         $form.StartPosition = 'CenterScreen'
+        $form.MinimumSize = New-Object System.Drawing.Size(760, 460)
+
+        $st = Get-AppSettings
+        if ($st) {
+            try {
+                if ([int]$st.winW -ge 700 -and [int]$st.winH -ge 440) {
+                    $form.Size = New-Object System.Drawing.Size([int]$st.winW, [int]$st.winH)
+                }
+                if ($null -ne $st.winX -and $null -ne $st.winY) {
+                    $form.StartPosition = 'Manual'
+                    $form.Location = New-Object System.Drawing.Point([int]$st.winX, [int]$st.winY)
+                }
+            } catch { }
+        }
 
         $script:GuiLbl = New-Object System.Windows.Forms.Label
         $script:GuiLbl.Location = New-Object System.Drawing.Point(12, 12)
-        $script:GuiLbl.Size = New-Object System.Drawing.Size(1080, 40)
+        $script:GuiLbl.Size = New-Object System.Drawing.Size(760, 40)
         $script:GuiLbl.Anchor = 'Top,Left,Right'
         $script:GuiLbl.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
+
+        $lblFil = New-Object System.Windows.Forms.Label
+        $lblFil.Text = 'Filtrar:'
+        $lblFil.Location = New-Object System.Drawing.Point(792, 16)
+        $lblFil.Size = New-Object System.Drawing.Size(48, 20)
+        $lblFil.Anchor = 'Top,Right'
+
+        $script:GuiFilterBox = New-Object System.Windows.Forms.TextBox
+        $script:GuiFilterBox.Location = New-Object System.Drawing.Point(842, 13)
+        $script:GuiFilterBox.Size = New-Object System.Drawing.Size(250, 24)
+        $script:GuiFilterBox.Anchor = 'Top,Right'
 
         $script:GuiGrid = New-Object System.Windows.Forms.DataGridView
         $script:GuiGrid.Location = New-Object System.Drawing.Point(12, 58)
@@ -537,36 +1217,112 @@ function Show-Gui {
 
         $script:GuiBtnUp = New-Object System.Windows.Forms.Button
         $script:GuiBtnUp.Text = 'Subir'
-        $script:GuiBtnUp.Size = New-Object System.Drawing.Size(110, 30)
+        $script:GuiBtnUp.Size = New-Object System.Drawing.Size(90, 30)
         $script:GuiBtnUp.Location = New-Object System.Drawing.Point(12, 622)
         $script:GuiBtnUp.Anchor = 'Bottom,Left'
 
+        $btnFlat = New-Object System.Windows.Forms.Button
+        $btnFlat.Text = 'Top global'
+        $btnFlat.Size = New-Object System.Drawing.Size(100, 30)
+        $btnFlat.Location = New-Object System.Drawing.Point(108, 622)
+        $btnFlat.Anchor = 'Bottom,Left'
+
+        $btnOpen = New-Object System.Windows.Forms.Button
+        $btnOpen.Text = 'Abrir no Explorador'
+        $btnOpen.Size = New-Object System.Drawing.Size(140, 30)
+        $btnOpen.Location = New-Object System.Drawing.Point(214, 622)
+        $btnOpen.Anchor = 'Bottom,Left'
+
+        $btnCopy = New-Object System.Windows.Forms.Button
+        $btnCopy.Text = 'Copiar caminho'
+        $btnCopy.Size = New-Object System.Drawing.Size(120, 30)
+        $btnCopy.Location = New-Object System.Drawing.Point(360, 622)
+        $btnCopy.Anchor = 'Bottom,Left'
+
         $btnCsv = New-Object System.Windows.Forms.Button
         $btnCsv.Text = 'Exportar CSV'
-        $btnCsv.Size = New-Object System.Drawing.Size(130, 30)
-        $btnCsv.Location = New-Object System.Drawing.Point(130, 622)
+        $btnCsv.Size = New-Object System.Drawing.Size(110, 30)
+        $btnCsv.Location = New-Object System.Drawing.Point(486, 622)
         $btnCsv.Anchor = 'Bottom,Left'
 
         $btnExit = New-Object System.Windows.Forms.Button
         $btnExit.Text = 'Sair'
-        $btnExit.Size = New-Object System.Drawing.Size(90, 30)
-        $btnExit.Location = New-Object System.Drawing.Point(268, 622)
+        $btnExit.Size = New-Object System.Drawing.Size(80, 30)
+        $btnExit.Location = New-Object System.Drawing.Point(602, 622)
         $btnExit.Anchor = 'Bottom,Left'
 
         $hint = New-Object System.Windows.Forms.Label
-        $hint.Text = 'Duplo-clique (ou Enter) numa pasta para entrar. Abre ordenada por tamanho.'
+        $hint.Text = 'Duplo-clique/Enter = entrar. Backspace = subir. Clique direito = mais opcoes.'
         $hint.AutoSize = $true
         $hint.ForeColor = [System.Drawing.Color]::Gray
-        $hint.Location = New-Object System.Drawing.Point(380, 629)
+        $hint.Location = New-Object System.Drawing.Point(694, 629)
         $hint.Anchor = 'Bottom,Left'
 
-        $form.Controls.AddRange(@($script:GuiLbl, $script:GuiGrid, $script:GuiBtnUp, $btnCsv, $btnExit, $hint))
+        $ctx = New-Object System.Windows.Forms.ContextMenuStrip
+        $miOpen = $ctx.Items.Add('Abrir no Explorador')
+        $miCopy = $ctx.Items.Add('Copiar caminho')
+        $miSub  = $ctx.Items.Add('Exportar esta sub-arvore (CSV)...')
+        $miOpen.Add_Click({ $n = Get-GuiSelectedNode; if ($n) { Invoke-OpenInExplorer $n.Path } })
+        $miCopy.Add_Click({ $n = Get-GuiSelectedNode; if ($n) { Copy-PathToClipboard $n.Path } })
+        $miSub.Add_Click({
+            $n = Get-GuiSelectedNode; if (-not $n) { return }
+            $sfd = New-Object System.Windows.Forms.SaveFileDialog
+            $sfd.Filter = 'CSV (*.csv)|*.csv'
+            $sfd.FileName = ($n.Name -replace '[^\w\.-]', '_') + '.csv'
+            if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+                Export-TreeCsv -node $n -CsvPath $sfd.FileName
+                [System.Windows.Forms.MessageBox]::Show("Exportado:`n$($sfd.FileName)", 'CSV') | Out-Null
+            }
+        })
+        $script:GuiGrid.ContextMenuStrip = $ctx
+        $script:GuiGrid.Add_CellMouseDown({
+            param($s, $e)
+            if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right -and $e.RowIndex -ge 0) {
+                $script:GuiGrid.ClearSelection()
+                $script:GuiGrid.Rows[$e.RowIndex].Selected = $true
+                $script:GuiGrid.CurrentCell = $script:GuiGrid.Rows[$e.RowIndex].Cells[0]
+            }
+        })
+
+        $form.Controls.AddRange(@($script:GuiLbl, $lblFil, $script:GuiFilterBox, $script:GuiGrid, $script:GuiBtnUp, $btnFlat, $btnOpen, $btnCopy, $btnCsv, $btnExit, $hint))
+
+        # Filtro por nome (ou caminho, na vista Top global) sobre a lista atual.
+        $script:GuiFilterBox.Add_TextChanged({
+            try {
+                $view = $script:GuiGrid.DataSource.DefaultView
+                $v = $script:GuiFilterBox.Text
+                if ([string]::IsNullOrWhiteSpace($v)) { $view.RowFilter = '' ; return }
+                $esc = $v -replace "'", "''" -replace '\[', '[[]' -replace '%', '[%]' -replace '\*', '[*]'
+                $col = if ($script:GuiFlat) { 'Caminho' } else { 'Nome' }
+                $view.RowFilter = "[$col] LIKE '%$esc%'"
+            } catch { }
+        })
 
         $script:GuiGrid.Add_CellDoubleClick({ param($s, $e) Enter-GuiRow $e.RowIndex })
+        # Ordenacao correcta da coluna "Tamanho" (texto formatado) -> ordena pela
+        # coluna oculta 'Bytes'. 1o clique = maiores primeiro; alterna depois.
+        $script:GuiGrid.Add_ColumnHeaderMouseClick({
+            param($s, $e)
+            if ($e.ColumnIndex -lt 0) { return }
+            if ($script:GuiGrid.Columns[$e.ColumnIndex].Name -ne 'Tamanho') { return }
+            try {
+                $cur = [string]$script:GuiGrid.DataSource.DefaultView.Sort
+                $new = if ($cur -eq 'Bytes DESC') { 'Bytes ASC' } else { 'Bytes DESC' }
+                $script:GuiGrid.DataSource.DefaultView.Sort = $new
+                $glyph = if ($new -eq 'Bytes DESC') { 'Descending' } else { 'Ascending' }
+                $script:GuiGrid.Columns['Tamanho'].HeaderCell.SortGlyphDirection = $glyph
+            } catch { }
+        })
         $script:GuiGrid.Add_KeyDown({
             param($s, $e)
             if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter -and $script:GuiGrid.CurrentRow) {
                 Enter-GuiRow $script:GuiGrid.CurrentRow.Index
+                $e.Handled = $true
+            }
+            elseif ($e.KeyCode -eq [System.Windows.Forms.Keys]::Back) {
+                if (-not $script:GuiFlat -and $script:GuiStack.Count -gt 0) {
+                    $script:GuiCurrent = $script:GuiStack.Pop(); Update-GuiGrid
+                }
                 $e.Handled = $true
             }
         })
@@ -576,16 +1332,24 @@ function Show-Gui {
                 Update-GuiGrid
             }
         })
+        $btnFlat.Add_Click({
+            $script:GuiFlat = -not $script:GuiFlat
+            $btnFlat.Text = if ($script:GuiFlat) { 'Navegar' } else { 'Top global' }
+            Update-GuiGrid
+        })
+        $btnOpen.Add_Click({ $n = Get-GuiSelectedNode; if ($n) { Invoke-OpenInExplorer $n.Path } })
+        $btnCopy.Add_Click({ $n = Get-GuiSelectedNode; if ($n) { Copy-PathToClipboard $n.Path } })
         $btnCsv.Add_Click({
             $sfd = New-Object System.Windows.Forms.SaveFileDialog
             $sfd.Filter = 'CSV (*.csv)|*.csv'
             $sfd.FileName = 'FolderSizes.csv'
             if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-                Export-TreeCsv -node $script:GuiCurrent -CsvPath $sfd.FileName
-                [System.Windows.Forms.MessageBox]::Show("Exportado para:`n$($sfd.FileName)", 'CSV') | Out-Null
+                Export-TreeCsv -node $script:GuiRoot -CsvPath $sfd.FileName
+                [System.Windows.Forms.MessageBox]::Show("Exportado:`n$($sfd.FileName)", 'CSV') | Out-Null
             }
         })
         $btnExit.Add_Click({ $form.Close() })
+        $form.Add_FormClosing({ Save-AppSettings $form })
 
         Update-GuiGrid
         [void]$form.ShowDialog()
@@ -615,47 +1379,101 @@ if ([string]::IsNullOrWhiteSpace($Path)) {
     Write-Error 'Nenhum caminho indicado. A sair.'; exit 1
 }
 
+# O prefixo estendido \\?\ exige um caminho ABSOLUTO. Caminhos relativos
+# ('.', '..\x', 'sub') produziam '\\?\.' e rebentavam o scan -> normaliza aqui.
+# .NET GetFullPath sozinho usa Environment.CurrentDirectory (dessincronizado da
+# localizacao do PowerShell), por isso combinamos com $PWD explicitamente.
+if (-not [System.IO.Path]::IsPathRooted($Path)) {
+    $Path = [System.IO.Path]::GetFullPath((Join-Path $PWD.ProviderPath $Path))
+}
+else {
+    try { $Path = [System.IO.Path]::GetFullPath($Path) } catch { }  # resolve '.'/'..' internos
+}
+
 if (-not (Test-Path -LiteralPath $Path)) {
     # Test-Path pode falhar em long paths; tenta enumerar a raiz na mesma
     try { [System.IO.Directory]::EnumerateFileSystemEntries((ConvertTo-ExtendedPath $Path)) | Out-Null }
     catch { Write-Error "Nao consigo aceder a '$Path'. Verifica a localizacao/permissoes."; exit 1 }
 }
 
+Add-RecentPath $Path
+
 Write-Host "A analisar '$Path' ... (isto pode demorar em shares grandes)" -ForegroundColor Cyan
+
+$useProgressGui = ($Gui -and -not $NoProgressGui)
+if ($useProgressGui) { [void](Show-ProgressWindow) }
+
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $root = Get-FolderNode -DisplayPath $Path
 $sw.Stop()
 Write-Progress -Activity 'A analisar...' -Completed
+if ($script:CancelRequested) { $script:Partial = $true }
+Close-ProgressWindow
 
 # Resumo
 Write-Host ''
 Write-Host '================= RESUMO =================' -ForegroundColor Green
+if ($script:Partial) { Write-Host '  *** SCAN CANCELADO - resultados PARCIAIS ***' -ForegroundColor Red }
 Write-Host ("Caminho        : $($root.Path)")
-Write-Host ("Tamanho total  : $(Format-Size $root.Size)")
+Write-Host ("Tamanho total  : $(if (-not $root.Complete) { '>=' })$(Format-Size $root.Size)")
 Write-Host ("Ficheiros      : $($root.FileCount)")
 Write-Host ("Subpastas      : $($root.DirCount)")
-Write-Host ("Long paths >260: $($script:LongPaths.Count)")
-Write-Host ("Erros/negados  : $($script:ErrCount)")
+Write-Host ("Fich. + recente: $(Format-Date $root.MaxMtime) (data do ficheiro mais recente da arvore)")
+Write-Host ("Caminhos >260  : $($script:LongPaths.Count)")
+Write-Host ("Junctions/links: $($script:SkipReparse) (ignorados; placeholders da cloud sao percorridos)")
+Write-Host ("Sem acesso     : $(@($script:DeniedDirs | Select-Object -Unique).Count) pasta(s), $(@($script:DeniedItems | Select-Object -Unique).Count) item(ns)")
+Write-Host ("Erros no scan  : $($script:ErrCount)")
+$incompleteN = Get-IncompleteCount -root $root
+if ($incompleteN -eq 0) {
+    Write-Host ("Cobertura      : COMPLETA")
+} else {
+    Write-Host ("Cobertura      : PARCIAL - $incompleteN pasta(s) nao lidas por completo; os seus totais (e os dos pais) sao MINIMOS. Ver coluna Complete no CSV.") -ForegroundColor DarkYellow
+}
 Write-Host ("Tempo          : $([math]::Round($sw.Elapsed.TotalSeconds,1))s")
 if ($root.Ext.Count -gt 0) {
     Write-Host ("Conteudo       : " + (Get-CategoryText -node $root -top 6))
 }
 Write-Host '=========================================' -ForegroundColor Green
 
-# Export CSV opcional (uma linha por pasta, achatando a arvore)
+# Exportacoes
 if ($CsvOut) {
     Export-TreeCsv -node $root -CsvPath $CsvOut
     Write-Host "CSV exportado: $CsvOut" -ForegroundColor Green
 }
+if ($SnapshotOut) {
+    Export-Snapshot -root $root -SnapPath $SnapshotOut
+    Write-Host "Snapshot gravado: $SnapshotOut" -ForegroundColor Green
+}
+$cmp = $null
+if ($CompareWith) {
+    $cmp = Compare-Snapshot -root $root -PrevPath $CompareWith
+    Show-Compare -cmp $cmp
+}
+if ($HtmlOut) {
+    Export-HtmlReport -root $root -HtmlPath $HtmlOut -Elapsed $sw.Elapsed.TotalSeconds -cmp $cmp
+    Write-Host "Relatorio HTML: $HtmlOut" -ForegroundColor Green
+}
 
-# Long paths (mostra os primeiros)
+# Pastas sem acesso (cobertura honesta do diagnostico)
+$ddirs = @($script:DeniedDirs | Select-Object -Unique)
+if ($ddirs.Count -gt 0) {
+    Write-Host ''
+    Write-Host "--- Pastas NAO medidas (sem acesso) - $($ddirs.Count) ---" -ForegroundColor DarkYellow
+    Write-Host "    (o espaco destas pastas nao entra nos totais)" -ForegroundColor DarkGray
+    $ddirs | Select-Object -First 15 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkYellow }
+    if ($ddirs.Count -gt 15) { Write-Host "  ... (+$($ddirs.Count - 15); lista completa no HTML)" -ForegroundColor DarkGray }
+}
+
+# Caminhos > 260
 if ($script:LongPaths.Count -gt 0) {
     Write-Host ''
-    Write-Host "--- Ficheiros com caminho > 260 caracteres (top 20 por tamanho) ---" -ForegroundColor Magenta
+    Write-Host "--- Caminhos > 260 caracteres (top 20 por tamanho) ---" -ForegroundColor Magenta
     $script:LongPaths | Sort-Object Size -Descending | Select-Object -First 20 |
-        ForEach-Object { Write-Host ('  {0,10}  len={1}  {2}' -f (Format-Size $_.Size), $_.Length, $_.Path) }
-    Write-Host "  (usa -CsvOut para exportar a arvore completa)" -ForegroundColor DarkGray
+        ForEach-Object { Write-Host ('  {0,-9} {1,10}  len={2}  {3}' -f $_.Type, (Format-Size $_.Size), $_.Length, $_.Path) }
 }
+
+# Top global na consola (se pedido e nao for modo GUI)
+if ($FlatTop -gt 0 -and -not $Gui) { Show-FlatTop -root $root -n $FlatTop }
 
 # Visualizacao granular
 Write-Host ''
@@ -667,12 +1485,14 @@ if ($Gui) {
     Write-Host "--- Top $Top pastas ($Depth nivel(is)) ---" -ForegroundColor Cyan
     Show-Report -node $root -top $Top -depth $Depth
     Write-Host ''
-    Write-Host 'Dica: corre com -Interactive para afundares camada a camada so onde quiseres.' -ForegroundColor DarkGray
+    Write-Host 'Dica: -Interactive para navegar, -Gui para janela, -FlatTop N para as maiores de toda a arvore.' -ForegroundColor DarkGray
 }
 
-# Erros detalhados (opcional, no fim)
+# Erros detalhados
 if ($script:ErrCount -gt 0) {
     Write-Host ''
     Write-Host "Nota: $($script:ErrCount) itens nao puderam ser lidos (permissoes/etc). Primeiros 10:" -ForegroundColor DarkYellow
     $script:Errors | Select-Object -First 10 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkYellow }
 }
+
+if ($script:Partial) { exit 2 }

@@ -1,113 +1,87 @@
 # folder-size-analyzer
 
-Script **PowerShell** para analisar o espaço ocupado por ficheiros e pastas numa
-localização de rede (`\\servidor\share\...`) ou local, de forma **granular** (por
-camadas), **sem necessidade de privilégios de administrador** e com suporte a
-**caminhos longos** que ultrapassam o limite de 260 caracteres (MAX_PATH).
+`Analyze-FolderSizes.ps1` — mede o espaço ocupado por pastas (local ou `\\servidor\share`),
+**sem admin**, com suporte a caminhos **> 260 caracteres**. Windows PowerShell 5.1.
 
-## Porquê
+Faz **um** scan para memória; depois navega em janela gráfica (`-Gui`), consola interativa
+(default) ou relatório de profundidade fixa (`-Depth`).
 
-Ferramentas gráficas (TreeSize, WinDirStat, etc.) muitas vezes:
+## Usar
 
-- exigem instalação / permissões que não tens numa máquina corporativa;
-- falham em caminhos com mais de 260 caracteres;
-- despejam a árvore inteira de uma vez, afogando-te em dados.
+Duplo-clique em **`Analisar-Pastas.cmd`** — abre janela para escolher a pasta (com histórico).
 
-Este script resolve os três problemas usando apenas PowerShell + .NET
-(`System.IO`), disponível em qualquer Windows.
-
-## Características
-
-- **Sem admin** — só lê; acessos negados são apanhados, contados, e o scan continua.
-- **Long paths (>260)** — usa o prefixo estendido `\\?\` / `\\?\UNC\` para ignorar
-  o MAX_PATH. No fim lista os ficheiros cujo caminho passa os 260 caracteres.
-- **Granular** — faz **um** scan e guarda a árvore em memória. Depois navegas:
-  em **janela gráfica** (`-Gui`, duplo-clique para entrar, estilo TreeSize),
-  em modo **interativo de consola** (afundas numa pasta só quando escolheres),
-  ou em modo **relatório** com profundidade fixa. A navegação é **instantânea**
-  porque parte da árvore já em memória — não recalcula pastas ao entrar.
-- **Foco Pareto (80/20)** — em cada nível assinala quantas das maiores pastas
-  somam 80% do espaço ("as poucas vitais" onde deves atuar primeiro).
-- **Tipo de conteúdo sem semântica** — classifica os ficheiros em categorias
-  legíveis (Vídeo, Imagem, Documento, Email/PST, Comprimido/Backup, CAD,
-  Base de dados, Instaladores…) e mostra o predominante por pasta. Dá-te uma
-  ideia do *que* é cada pasta sem interpretar conteúdos. Na consola liga-se com
-  `-ShowExtensions`; na janela gráfica aparece sempre na coluna "Conteúdo".
-- **Junctions / symlinks ignorados** — evita contagens duplicadas e loops.
-- **Exportação CSV** — árvore completa, uma linha por pasta.
-
-## Utilização
+Ou por linha de comando:
 
 ```powershell
-# Sem argumentos: abre uma JANELA para escolher a pasta e mostra resultados em janela
-.\Analyze-FolderSizes.ps1
+# janela gráfica: scan com progresso + Cancelar, depois navegação
+.\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -Gui
 
-# Janela gráfica (estilo TreeSize) — duplo-clique para entrar nas pastas
-.\Analyze-FolderSizes.ps1 -Path '\\servidor\share\Pasta' -Gui
+# relatório: 2 níveis + as 50 maiores pastas de toda a árvore
+.\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -Depth 2 -Top 20 -FlatTop 50
 
-# Modo interativo de consola (default) — afundas camada a camada só onde quiseres
-.\Analyze-FolderSizes.ps1 -Path '\\servidor\share\Pasta'
+# relatório HTML + snapshot para comparar depois
+.\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -HtmlOut rel.html -SnapshotOut hoje.json
 
-# Relatório fixo de 2 níveis, top 10, com tipos de ficheiro
-.\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -Depth 2 -Top 10 -ShowExtensions
-
-# Scan + exportar árvore completa para CSV
-.\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -CsvOut relatorio.csv
-
-# Ignorar pastas durante o scan
-.\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -Exclude 'node_modules','.git'
+# o que mudou desde um snapshot anterior
+.\Analyze-FolderSizes.ps1 -Path '\\servidor\share' -CompareWith hoje.json -HtmlOut evolucao.html
 ```
 
-Se a política de execução estiver bloqueada (comum em máquinas corporativas),
-corre **sem alterar nada no sistema**, só para esta invocação:
+Se o `.ps1` for bloqueado ("not digitally signed" / MOTW), desbloqueia e corre:
 
 ```powershell
+Get-ChildItem *.ps1 | Unblock-File
 powershell -ExecutionPolicy Bypass -File .\Analyze-FolderSizes.ps1 -Path '\\servidor\share'
 ```
 
-### Na janela gráfica (`-Gui`)
-
-- **Duplo-clique** (ou Enter) numa linha → entra na pasta.
-- **Subir** → volta ao nível anterior.
-- **Exportar CSV** → grava a subárvore atual num ficheiro à tua escolha.
-- Clica no cabeçalho de uma coluna para ordenar (por nº de ficheiros, etc.).
-
-> A janela usa WinForms (incluído no Windows, sem admin). Funciona em consola
-> local e em sessão **RDP**; não funciona em SSH puro sem interface gráfica —
-> nesse caso usa o modo interativo de consola abaixo.
-
-### No modo interativo de consola
-
-| Tecla | Ação |
-|-------|------|
-| `n` (número) | afundar na pasta número *n* |
-| `u` | subir um nível |
-| `e` | ligar/desligar o breakdown por extensão |
-| `q` | sair |
+O `Analisar-Pastas.cmd` já faz as duas coisas (numa GPO corporativa com `MachinePolicy
+RemoteSigned`, o `-ExecutionPolicy Bypass` é ignorado — o que resolve é o `Unblock-File`).
+Com `MachinePolicy AllSigned` só assinando o script.
 
 ## Parâmetros
 
 | Parâmetro | Descrição | Default |
-|-----------|-----------|---------|
-| `-Path` | Localização a analisar. Se omitido, abre janela para escolher a pasta | — |
-| `-Top` | Nº de pastas a mostrar por nível | `15` |
-| `-Depth` | Modo relatório: nº de camadas a imprimir de uma vez | `0` (= interativo) |
-| `-Gui` | Abre a janela gráfica (duplo-clique para entrar) | — |
-| `-Interactive` | Força o modo interativo de consola | — |
-| `-ShowExtensions` | Mostra a categoria de conteúdo por pasta (consola) | desligado |
+|---|---|---|
+| `-Path` | Pasta/share a analisar. Omitido → janela de escolha | — |
+| `-Gui` | Janela de navegação (+ progresso com Cancelar no scan) | — |
+| `-Depth` | Modo relatório: nº de níveis a imprimir | `0` (= interativo) |
+| `-Top` | Pastas por nível | `15` |
+| `-FlatTop` | Nº de pastas na vista "maiores de toda a árvore" (consola) | `0` |
+| `-ShowExtensions` | Categoria de conteúdo por pasta (consola) | desligado |
 | `-Exclude` | Nomes de pasta a ignorar (wildcards) | — |
-| `-CsvOut` | Caminho para exportar a árvore em CSV | — |
+| `-CsvOut` | Exporta a árvore (uma linha por pasta) | — |
+| `-HtmlOut` | Relatório HTML autónomo | — |
+| `-SnapshotOut` | Grava snapshot JSON | — |
+| `-CompareWith` | Compara com um snapshot anterior | — |
+| `-NoProgressGui` | Não mostra a janela de progresso | — |
 
-## Nota de desempenho
+Consola interativa: `n` (número) afunda, `u` sobe, `e` liga/desliga tipos, `t` top global, `q` sai.
+Janela: duplo-clique/Enter entra, Backspace sobe, caixa **Filtrar** restringe a lista por nome,
+clique no cabeçalho **Tamanho** ordena por tamanho real, clique direito = abrir no Explorador /
+copiar caminho / exportar sub-árvore.
 
-Calcular o tamanho de cada pasta obriga a percorrer **tudo** uma vez, por isso o
-scan inicial de um share grande demora (há uma barra de progresso). Depois disso,
-a navegação é instantânea porque a árvore já está em memória.
+## Comportamento
 
-## Requisitos
-
-- Windows PowerShell 5.1 (o que vem por omissão no Windows) ou PowerShell 7+.
-- Nenhuma dependência externa.
+- **Sem acesso**: pastas que não se conseguiu enumerar (e ficheiros sem acesso a metadados)
+  são contados à parte e listados no fim / no HTML. **O espaço dessas pastas não entra nos
+  totais.** O scan continua sempre — um erro a meio de uma pasta só faz perder o resto *dessa*
+  pasta.
+- **Cobertura** (`Complete`): cada pasta é marcada `True` se ela e toda a subárvore foram
+  lidas por completo, `False` se algo falhou (sem acesso, falha de enumeração). Numa pasta
+  `False` — e em todas as ascendentes, incluindo o Total — os números são **mínimos** (`≥`),
+  não totais. O resumo diz `Cobertura: COMPLETA` ou `PARCIAL - N pasta(s)`; no CSV é a coluna
+  `Complete`; na consola/HTML as linhas afetadas levam `≥`.
+- **Junctions/symlinks**: ignorados (loops, dupla contagem). Placeholders de cloud (OneDrive)
+  são percorridos normalmente.
+- **"Fich. + recente"**: é a data do ficheiro **mais recente da subárvore** — não significa
+  que a pasta foi mexida agora (pode ter 1 ficheiro de 2026 e 500 GB de 2015).
+- **Caminhos > 260**: suportados (`\\?\`); ficheiros **e pastas** com caminho longo são
+  listados no fim (o Explorer pode na mesma não os abrir).
+- **CSV**: uma linha por pasta — `Path, Name, Depth, ParentPath, SizeBytes, Size, Files,
+  SubDirs, NewestFileLocal, NewestFileUtc, TopCategory, Complete`. `Depth` = nível relativo à
+  raiz. Filtra `Complete = True` para trabalhar só com números exatos.
+- Cancelar o scan → resultados parciais (exit code 2).
+- O 1.º scan de um share grande demora (percorre tudo uma vez); depois a navegação é instantânea.
+- Estado por utilizador em `%APPDATA%\FolderAnalyzer` (histórico, tamanho da janela).
 
 ## Licença
 
