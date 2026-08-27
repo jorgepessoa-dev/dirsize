@@ -109,17 +109,6 @@ a navegação é instantânea porque a árvore já está em memória.
 - Windows PowerShell 5.1 (o que vem por omissão no Windows) ou PowerShell 7+.
 - Nenhuma dependência externa.
 
-## Ferramentas (`tools/`)
-
-Auxiliares para uma revisão de código independente por outros modelos/agentes:
-
-- **`tools/REVIEW_REQUEST.md`** — pacote de revisão: prompt estruturado (pontos de
-  risco, formato de resposta obrigatório) para colar no DeepSeek/Gemini em
-  sessões separadas e comparar de forma ortogonal.
-- **`tools/dispatch_review.sh`** — driver `tmux` (`send-keys` + `capture-pane`)
-  para submeter esse prompt aos panes de agentes locais e recolher a resposta.
-  Correr na máquina onde os panes tmux vivem.
-
 ## Licença
 
 MIT — ver [LICENSE](LICENSE).
