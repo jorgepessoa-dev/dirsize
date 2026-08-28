@@ -110,9 +110,14 @@ Gera em `<pasta do csv>\diagnostico\`:
 A ferramenta **faz aparecer o que precisa de decisão**; não decide. Ownership, taxonomia
 e "isto pode ser eliminado" são juízos de governação, ficam a cargo de pessoas.
 
-Determinismo: os **relatórios** (`0x-*.csv`) são byte-idênticos para o mesmo CSV + parâmetros;
-`_PARAMETROS.txt` é a exceção (tem a data). `Read-Baseline` é *fail-closed* — uma baseline
-sem exactamente uma raiz `Depth=0`, com números não-inteiros ou `Complete` inválido, aborta.
+Determinismo: os **relatórios** (`0x-*.csv` e `resumo.html`) são byte-idênticos para o mesmo
+CSV + parâmetros; `_PARAMETROS.txt` é a exceção (tem a data). `Read-Baseline` é *fail-closed* —
+uma baseline sem exactamente uma raiz `Depth=0`, com números não-inteiros ou `Complete`
+inválido, aborta.
+
+O próximo passo (não determinista) é preencher `06-manifest-esqueleto.csv` — Área,
+Responsáveis, `Decision` (MIGRATE / ARCHIVE / DELETE_CANDIDATE / REVIEW), `DestinationPath`.
+A validação desse manifesto e a migração em si são fases seguintes.
 
 ## Licença
 
