@@ -264,11 +264,19 @@ INVESTIGAR. Report `02-grande-e-antigo` only lists `Complete=True` subtrees — 
 one has lower-bound size/age and belongs in `05` instead. `01b-areas-pareto` carries a
 `TotalComplete` column (root coverage) so a partial baseline's percentages read as provisional.
 
-Determinism is scoped: the **reports** (`0x-*.csv`) are byte-identical for the same CSV +
-params; `_PARAMETROS.txt` is the deliberate exception (it has a timestamp), which is why the
-determinism test filters it out. `Read-Baseline` is **fail-closed**: exactly one `Depth=0`
+`resumo.html` is an 8th output: the 01b/02/03/04/05 rankings side by side, self-contained, for
+showing to áreas/chefia. It carries **no timestamp in the body** (provenance = the CSV
+filename + SHA-256) so it stays byte-deterministic and is checked by the same determinism
+assert. It repeats the "these are hints, not a verdict" and "ownership stays with people"
+framing — mutation M7 breaks that and the suite fails.
+
+Determinism is scoped: the **reports** (`0x-*.csv` and `resumo.html`) are byte-identical for
+the same CSV + params; `_PARAMETROS.txt` is the deliberate exception (it has a timestamp),
+which is why the determinism test filters it out with `Where-Object` (not `-Exclude`, which
+`Get-ChildItem` ignores under `-LiteralPath` in PS 5.1). `Read-Baseline` is **fail-closed**: exactly one `Depth=0`
 row, all numeric columns non-negative integers, `Complete` in {True,False}, `NewestFileUtc`
 empty or ISO — otherwise it throws. `Get-RootRow` has no fallback (the source is a controlled
-tool). `diagnose.tests.ps1`: 41 asserts on a fixed synthetic CSV + a `-Mutate` mode that
-breaks each fixed rule (categories, cold cutoff, Pareto threshold, coverage sign, the `02`
-Complete filter, the one-root check) and confirms the suite fails on each.
+tool). `diagnose.tests.ps1`: 46 asserts on a fixed synthetic CSV + a `-Mutate` mode that breaks each
+fixed rule (categories, cold cutoff, Pareto threshold, coverage sign, the `02` Complete
+filter, the one-root check, the `resumo.html` "not a verdict" warning) and confirms the suite
+fails on each.

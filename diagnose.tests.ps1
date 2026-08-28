@@ -113,6 +113,14 @@ function Invoke-DiagAsserts {
     A '06 decisao vazia'           ([string]::IsNullOrEmpty($man[0].Decision) -and [string]::IsNullOrEmpty($man[0].Area))
     A '06 contexto preenchido'     (-not [string]::IsNullOrEmpty($man[0].Size))
 
+    $htmlPath = Join-Path $root 'diagnostico\resumo.html'
+    A 'resumo.html existe'  (Test-Path -LiteralPath $htmlPath)
+    $html = Get-Content -LiteralPath $htmlPath -Raw
+    A 'resumo.html fecha o documento'  ($html -match '</html>')
+    A 'resumo.html: pistas NAO sao veredicto'  ($html -match 'Nao sao veredicto')
+    A 'resumo.html: ownership fica com as areas'  ($html -match 'sao das areas')
+    A 'resumo.html sem data no corpo (determinista)'  (-not ($html -match '\d{4}-\d\d-\d\d \d\d:\d\d'))
+
     A '_PARAMETROS.txt existe'  (Test-Path -LiteralPath (Join-Path $root 'diagnostico\_PARAMETROS.txt'))
     $pp = Get-Content -LiteralPath (Join-Path $root 'diagnostico\_PARAMETROS.txt') -Raw
     A '_PARAMETROS tem SHA-256'  ($pp -match 'csv_sha256\s*:\s*[0-9A-F]{64}')
@@ -181,6 +189,8 @@ $casos = @(
        Rx = '\[int64\]\$_\.SizeBytes -gt 0 -and \(Test-Truthy \$_\.Complete\)'; Para = '[int64]$$_.SizeBytes -gt 0' }
     @{ Nome = 'M6 Read-Baseline deixa passar baseline sem raiz'
        Rx = 'if \(\$raizes\.Count -ne 1\)'; Para = 'if ($$false)' }
+    @{ Nome = 'M7 resumo.html deixa cair o aviso "nao sao veredicto"'
+       Rx = '<b>Nao sao veredicto\.</b> '; Para = '' }
 )
 $anyMiss = $false
 foreach ($c in $casos) {

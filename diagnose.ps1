@@ -57,7 +57,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:DiagVersion = '1.0'
+$script:DiagVersion = '1.1'   # 1.1: resumo.html (mesmos rankings, apresentacao)
 
 # ----------------------------------------------------------------------------
 # Regras FIXAS. Alterar aqui e alterar o criterio -- de proposito visivel.
@@ -143,6 +143,12 @@ function ConvertFrom-Iso {
 }
 
 function Test-Truthy { param([string] $s) return ($s -eq 'True' -or $s -eq '1' -or $s -eq 'true') }
+
+function ConvertTo-HtmlText {
+    param([string] $s)
+    if ($null -eq $s) { return '' }
+    return $s.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace('"', '&quot;')
+}
 
 # Escreve um relatorio de forma deterministica (ordem de colunas fixa, UTF-8).
 function Write-Report {
@@ -315,6 +321,145 @@ function Get-ManifestEsqueleto {
 }
 
 # ----------------------------------------------------------------------------
+# resumo.html -- os mesmos rankings lado a lado, num ficheiro autonomo para
+# mostrar as areas / a chefia. DETERMINISTA: nao leva data no corpo (a
+# proveniencia e o nome do CSV + o SHA-256). Mesmo CSV -> HTML byte-identico.
+# ----------------------------------------------------------------------------
+function Export-Resumo {
+    param($Root, [string] $CsvPath, [string] $CsvHash,
+          $Areas, $Frio, $Complexo, $Pistas, $Parcial,
+          [datetime] $Corte, [int] $TopHtml = 20)
+
+    $sb = New-Object System.Text.StringBuilder
+    $add = { param($s) [void]$sb.AppendLine($s) }
+    $rootParcial = -not (Test-Truthy $Root.Complete)
+
+    $css = @'
+<style>
+ body{font-family:Segoe UI,Arial,sans-serif;margin:24px;color:#1c1c1c;background:#fafafa}
+ h1{font-size:20px;margin:0 0 4px} h2{font-size:15px;margin:26px 0 8px;border-bottom:1px solid #ddd;padding-bottom:4px}
+ .muted{color:#666;font-size:12px} .cards{display:flex;flex-wrap:wrap;gap:12px;margin:14px 0}
+ .card{background:#fff;border:1px solid #e2e2e2;border-radius:8px;padding:10px 14px;min-width:110px}
+ .card .v{font-size:18px;font-weight:600} .card .l{font-size:11px;color:#777;text-transform:uppercase;letter-spacing:.04em}
+ table{border-collapse:collapse;width:100%;background:#fff;font-size:13px;margin-bottom:8px}
+ th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #eee} th{background:#f0f0f0}
+ td.num{text-align:right;white-space:nowrap} .bar{background:#e8e8e8;border-radius:3px;height:12px;overflow:hidden}
+ .bar>span{display:block;height:12px;background:#4a7fb5} .path{font-family:Consolas,monospace;font-size:12px;word-break:break-all}
+ .warn{background:#fff4d6;border:1px solid #e6c34d;border-radius:6px;padding:8px 12px;margin:10px 0}
+ .note{background:#eef6ee;border:1px solid #bcd9bc;border-radius:6px;padding:8px 12px;margin:14px 0}
+</style>
+'@
+
+    & $add '<!doctype html><html lang="pt"><head><meta charset="utf-8">'
+    & $add ("<title>Diagnostico - " + (ConvertTo-HtmlText $Root.Path) + "</title>")
+    & $add $css
+    & $add '</head><body>'
+    & $add '<h1>Diagnostico do share &mdash; resumo</h1>'
+    & $add ("<div class='muted'>" + (ConvertTo-HtmlText $Root.Path) +
+            " &mdash; baseline: " + (ConvertTo-HtmlText (Split-Path -Leaf $CsvPath)) +
+            " &mdash; SHA-256 " + $CsvHash.Substring(0, 16) + "&hellip;" +
+            " &mdash; diagnose v" + $script:DiagVersion + "</div>")
+
+    if ($rootParcial) {
+        & $add ("<div class='warn'><b>Cobertura parcial.</b> A raiz tem pastas nao lidas " +
+                "(sem acesso). O total e as percentagens sao <b>minimos</b> &mdash; podem crescer " +
+                "quando o acesso for resolvido. Ver a seccao <i>Cobertura parcial</i>.</div>")
+    }
+
+    & $add "<div class='cards'>"
+    & $add ("<div class='card'><div class='v'>" + (ConvertTo-HtmlText $Root.Size) +
+            $(if ($rootParcial) { ' &ge;' } else { '' }) + "</div><div class='l'>Total</div></div>")
+    & $add ("<div class='card'><div class='v'>" + @($Areas).Count + "</div><div class='l'>Areas</div></div>")
+    & $add ("<div class='card'><div class='v'>" + @($Frio).Count + "</div><div class='l'>Grande + antigo</div></div>")
+    & $add ("<div class='card'><div class='v'>" + @($Complexo).Count + "</div><div class='l'>Complexas</div></div>")
+    & $add ("<div class='card'><div class='v'>" + @($Pistas).Count + "</div><div class='l'>Pistas limpeza</div></div>")
+    & $add ("<div class='card'><div class='v'>" + @($Parcial).Count + "</div><div class='l'>Sem acesso</div></div>")
+    & $add "</div>"
+
+    # --- Pareto das areas ---
+    & $add "<h2>Areas por espaco (Pareto)</h2>"
+    & $add ("<p class='muted'>As areas marcadas <b>80</b> somam ~80% do espaco. E onde comeca o trabalho." +
+            $(if ($rootParcial) { " Percentagens PROVISORIAS (raiz parcial)." } else { '' }) + "</p>")
+    & $add "<table><tr><th>Area</th><th class='num'>Tamanho</th><th class='num'>%</th><th></th><th class='num'>% cumul.</th><th>Pareto</th><th>Conteudo</th></tr>"
+    foreach ($a in $Areas) {
+        $w = [math]::Min(100, [double]$a.PctDoTotal)
+        & $add ("<tr><td class='path'>" + (ConvertTo-HtmlText $a.Path) + "</td>" +
+                "<td class='num'>" + (ConvertTo-HtmlText $a.Size) + "</td>" +
+                "<td class='num'>" + $a.PctDoTotal + "%</td>" +
+                "<td style='width:120px'><div class='bar'><span style='width:$w%'></span></div></td>" +
+                "<td class='num'>" + $a.PctCumulativa + "%</td>" +
+                "<td>" + (ConvertTo-HtmlText $a.Pareto) + "</td>" +
+                "<td>" + (ConvertTo-HtmlText $a.TopCategory) + "</td></tr>")
+    }
+    & $add "</table>"
+
+    # --- grande e antigo ---
+    & $add ("<h2>Grande e antigo (candidatas a arquivo)</h2>")
+    & $add ("<p class='muted'>Subarvores completamente observadas cujo ficheiro mais recente e anterior a " +
+            $Corte.ToString('yyyy-MM-dd') + ". Nada la dentro mudou desde entao.</p>")
+    if (@($Frio).Count -eq 0) { & $add '<p class="muted">(nenhuma)</p>' }
+    else {
+        & $add "<table><tr><th>Pasta</th><th class='num'>Tamanho</th><th>Ficheiro mais recente</th><th class='num'>Fich.</th><th>Conteudo</th></tr>"
+        foreach ($f in (@($Frio) | Select-Object -First $TopHtml)) {
+            & $add ("<tr><td class='path'>" + (ConvertTo-HtmlText $f.Path) + "</td>" +
+                    "<td class='num'>" + (ConvertTo-HtmlText $f.Size) + "</td>" +
+                    "<td>" + (ConvertTo-HtmlText $f.FicheiroMaisRecente) + "</td>" +
+                    "<td class='num'>" + $f.Files + "</td>" +
+                    "<td>" + (ConvertTo-HtmlText $f.TopCategory) + "</td></tr>")
+        }
+        & $add "</table>"
+    }
+
+    # --- complexidade ---
+    & $add "<h2>Complexidade estrutural (caras de migrar)</h2>"
+    & $add "<p class='muted'>Profundas, largas ou com caminhos longos. Planear estas separadamente.</p>"
+    if (@($Complexo).Count -eq 0) { & $add '<p class="muted">(nenhuma)</p>' }
+    else {
+        & $add "<table><tr><th>Pasta</th><th class='num'>Nivel</th><th class='num'>Subpastas</th><th class='num'>Chars</th><th>Motivo</th></tr>"
+        foreach ($c in (@($Complexo) | Select-Object -First $TopHtml)) {
+            & $add ("<tr><td class='path'>" + (ConvertTo-HtmlText $c.Path) + "</td>" +
+                    "<td class='num'>" + $c.Depth + "</td><td class='num'>" + $c.SubDirs + "</td>" +
+                    "<td class='num'>" + $c.CharsNoCaminho + "</td>" +
+                    "<td>" + (ConvertTo-HtmlText $c.Motivo) + "</td></tr>")
+        }
+        & $add "</table>"
+    }
+
+    # --- pistas de limpeza ---
+    & $add "<h2>Pistas de limpeza</h2>"
+    & $add ("<div class='warn'>Sao <b>pistas para investigar</b>, decididas por regra fixa (categoria ou " +
+            "nome). <b>Nao sao veredicto.</b> Nada se elimina sem validacao de quem responde pela area.</div>")
+    if (@($Pistas).Count -eq 0) { & $add '<p class="muted">(nenhuma)</p>' }
+    else {
+        & $add "<table><tr><th>Pasta</th><th class='num'>Tamanho</th><th>Conteudo</th><th>Motivo</th></tr>"
+        foreach ($p in (@($Pistas) | Select-Object -First $TopHtml)) {
+            & $add ("<tr><td class='path'>" + (ConvertTo-HtmlText $p.Path) + "</td>" +
+                    "<td class='num'>" + (ConvertTo-HtmlText $p.Size) + "</td>" +
+                    "<td>" + (ConvertTo-HtmlText $p.TopCategory) + "</td>" +
+                    "<td>" + (ConvertTo-HtmlText $p.Motivo) + "</td></tr>")
+        }
+        & $add "</table>"
+    }
+
+    # --- cobertura parcial ---
+    if (@($Parcial).Count -gt 0) {
+        & $add "<h2>Cobertura parcial (sem acesso) &mdash; $(@($Parcial).Count)</h2>"
+        & $add "<p class='muted'>O espaco destas pastas NAO entra nos totais. Pedir acesso antes de decidir.</p>"
+        & $add "<ul class='path'>"
+        foreach ($x in (@($Parcial) | Select-Object -First 100)) { & $add ("<li>" + (ConvertTo-HtmlText $x.Path) + "</li>") }
+        & $add "</ul>"
+    }
+
+    & $add ("<div class='note'>Isto e um retrato quantitativo, nao um plano. Ownership, taxonomia e " +
+            "decisoes de eliminacao sao das areas. Dados completos: os ficheiros <code>0x-*.csv</code> " +
+            "na pasta <code>diagnostico\</code>; limiares usados: <code>_PARAMETROS.txt</code>.</div>")
+    & $add '</body></html>'
+
+    $fp = Join-Path $script:OutFull 'resumo.html'
+    [System.IO.File]::WriteAllText($fp, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+# ----------------------------------------------------------------------------
 # Execucao
 # ----------------------------------------------------------------------------
 
@@ -338,21 +483,36 @@ Write-Host ("Pastas   : {0}" -f $rows.Count)
 Write-Host ("Saida    : {0}" -f $script:OutFull)
 Write-Host ''
 
-Write-Report '01-espaco-top.csv'       (Get-RankEspaco       -Rows $rows -Root $root -N $TopEspaco) `
+# Cada relatorio e calculado uma vez, gravado em CSV, e (01b..05) reaproveitado
+# no resumo.html.
+$rEspaco   = Get-RankEspaco       -Rows $rows -Root $root -N $TopEspaco
+$rAreas    = Get-RankAreasPareto  -Rows $rows -Root $root -Nivel $ManifestNivel
+$rFrio     = Get-RankFrio         -Rows $rows -Root $root -Corte $FrioAntesDe
+$rComplexo = Get-RankComplexidade -Rows $rows -Root $root -Profundo $ProfundoEm -Largo $LargoEm
+$rPistas   = Get-PistasLimpeza    -Rows $rows -Root $root
+$rParcial  = Get-CoberturaParcial -Rows $rows -Root $root
+$rManifest = Get-ManifestEsqueleto -Rows $rows -Root $root -Nivel $ManifestNivel
+
+Write-Report '01-espaco-top.csv'        $rEspaco `
     @('Path','Size','SizeBytes','Depth','Files','TopCategory','Complete')
-Write-Report '01b-areas-pareto.csv'    (Get-RankAreasPareto  -Rows $rows -Root $root -Nivel $ManifestNivel) `
+Write-Report '01b-areas-pareto.csv'     $rAreas `
     @('Path','Size','SizeBytes','PctDoTotal','PctCumulativa','Pareto','Files','TopCategory','Complete','TotalComplete')
-Write-Report '02-grande-e-antigo.csv'  (Get-RankFrio         -Rows $rows -Root $root -Corte $FrioAntesDe) `
+Write-Report '02-grande-e-antigo.csv'   $rFrio `
     @('Path','Size','SizeBytes','FicheiroMaisRecente','Files','TopCategory','Complete')
-Write-Report '03-complexidade.csv'     (Get-RankComplexidade -Rows $rows -Root $root -Profundo $ProfundoEm -Largo $LargoEm) `
+Write-Report '03-complexidade.csv'      $rComplexo `
     @('Path','Depth','SubDirs','CharsNoCaminho','Size','SizeBytes','Motivo','Complete')
-Write-Report '04-pistas-limpeza.csv'   (Get-PistasLimpeza    -Rows $rows -Root $root) `
+Write-Report '04-pistas-limpeza.csv'    $rPistas `
     @('Path','Size','SizeBytes','Files','TopCategory','FicheiroMaisRecente','Motivo','Accao')
-Write-Report '05-cobertura-parcial.csv' (Get-CoberturaParcial -Rows $rows -Root $root) `
+Write-Report '05-cobertura-parcial.csv' $rParcial `
     @('Path','SizeMinimo','SizeBytesMinimo','Files','Depth','TopCategory')
-Write-Report '06-manifest-esqueleto.csv' (Get-ManifestEsqueleto -Rows $rows -Root $root -Nivel $ManifestNivel) `
+Write-Report '06-manifest-esqueleto.csv' $rManifest `
     @('CurrentPath','Size','SizeBytes','Files','FicheiroMaisRecente','TopCategory','Complete',
       'Area','ResponsibleTeam','ResponsiblePerson','Decision','DestinationPath','Notes')
+
+Export-Resumo -Root $root -CsvPath $csvFull -CsvHash $hash `
+    -Areas $rAreas -Frio $rFrio -Complexo $rComplexo -Pistas $rPistas -Parcial $rParcial `
+    -Corte $FrioAntesDe
+Write-Host ("  {0,-32} {1}" -f 'resumo.html', '(rankings lado a lado)')
 
 # Registo de reproducibilidade
 $params = @(

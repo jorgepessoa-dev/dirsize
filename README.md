@@ -105,6 +105,7 @@ Gera em `<pasta do csv>\diagnostico\`:
 | `04-pistas-limpeza.csv` | categoria ou nome batem num padrão fixo → **INVESTIGAR**, nunca eliminar |
 | `05-cobertura-parcial.csv` | `Complete=False` → números são mínimos, resolver acesso primeiro |
 | `06-manifest-esqueleto.csv` | uma linha por área, colunas de decisão vazias para o humano preencher |
+| `resumo.html` | os rankings 01b/02/03/04/05 lado a lado, ficheiro autónomo para mostrar às áreas / à chefia |
 
 A ferramenta **faz aparecer o que precisa de decisão**; não decide. Ownership, taxonomia
 e "isto pode ser eliminado" são juízos de governação, ficam a cargo de pessoas.
