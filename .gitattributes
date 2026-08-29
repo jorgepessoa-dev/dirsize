@@ -1,0 +1,10 @@
+# Scripts shell tem de chegar ao laptop com LF, independentemente do core.autocrlf
+# de quem faz commit (o autor edita em Windows).
+*.sh    text eol=lf
+
+# .cmd e' Windows -> CRLF
+*.cmd   text eol=crlf
+
+# PowerShell corre bem com qualquer um; deixa o git normalizar.
+*.ps1   text
+*.md    text
