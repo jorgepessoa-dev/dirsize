@@ -253,8 +253,11 @@ Everything is in `dirsize.ps1`, organized top-to-bottom as:
 `dirsize.ps1` (the frozen scanner), `Pastas.cmd` (double-click launcher), `golden.ps1`
 (scanner regression harness, dev-only), `diagnose.ps1` + `diagnose.tests.ps1` (Phase 2:
 turns a baseline CSV into deterministic rankings — a *downstream consumer*, not a scanner
-feature, so it is out of scope for the v2.1 freeze and has its own test suite), `README.md`,
-`LICENSE`.
+feature, so it is out of scope for the v2.1 freeze and has its own test suite),
+`tools/review-request.md` + `tools/dispatch-review.sh` (paste-ready review prompt for the
+whole ecosystem, and an **opt-in single-target** tmux driver — `dispatch-review.sh
+<claude|deepcode>`, one agent per run, never both; run on the laptop where the tmux panes
+live, not from a cloud session), `README.md`, `LICENSE`.
 
 `diagnose.ps1` design rule: **it surfaces what needs a human decision; it never decides.**
 Ownership, taxonomy and "this can be deleted" are governance judgements and stay with people.
